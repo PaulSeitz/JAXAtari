@@ -23,6 +23,7 @@ from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 from torch.utils.tensorboard import SummaryWriter
 import jaxatari
+import wandb
 from jaxatari.wrappers import NormalizeObservationWrapper, ObjectCentricWrapper, PixelObsWrapper, AtariWrapper, LogWrapper, FlattenObservationWrapper
 from jaxatari import spaces
 from ppo_jaxatari_vmap_eval import evaluate
@@ -48,7 +49,7 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "jaxatari_tests"
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
@@ -62,22 +63,24 @@ class Args:
     """whether the environment should use pixel-based observations"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
+    log_interval: int = 10
+    """how often to log the metrics to tensorboard (in num. of iterations)"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "freeway"
+    env_id: str = "asterix"
     """the id of the environment"""
-    mods: tuple[str] = ("no_falling_coconut", )
-    total_timesteps: int = 10_000_000
+    mods: tuple[str] = ()
+    total_timesteps: int = 319_979_520
     """total timesteps of the experiments"""
-    learning_rate: float = 2.5e-4
+    learning_rate: float = 7e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 8
+    num_envs: int = 1024
     """the number of parallel game environments"""
-    num_steps: int = 128
+    num_steps: int = 32
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -85,7 +88,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 4
+    num_minibatches: int = 32
     """the number of mini-batches"""
     update_epochs: int = 4
     """the K epochs to update the policy"""
@@ -127,7 +130,7 @@ def make_env(env_id, seed, num_envs, mods=[], pixel_based=True, eval=False):
                 noop_reset=30,
                 sticky_actions=False, # seems to be default in envpool
                 first_fire=True,
-                #full_action_space=False # TODO: this is missing in jaxatari, although default is reduced action space
+                #full_action_space=False # TODO: this is missing in jaxatari, although default is reduced action space TODO: implement full action space as option! 
         )
         if pixel_based:
             env = PixelObsWrapper(
@@ -252,8 +255,6 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
     run_name = f"{args.env_id}__{args.exp_name}_{"oc" if not args.pixel_based else "pixel"}__{args.seed}__{int(time.time())}"
     if args.track:
-        import wandb
-
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -497,11 +498,44 @@ if __name__ == "__main__":
         writer.add_scalar("eval/episodic_return", np.mean(jax.device_get(episodic_returns)), global_step) 
 
         if args.capture_video and renderer is not None: 
-            frames = jax.vmap(renderer.render)(env_states)
-            # currently (N, W, H, C), need (N, C, H, W)
-            frames = jnp.transpose(frames, (0, 3, 1, 2)) 
-            writer.add_video("video", np.array(frames)[None, ...], global_step=global_step, fps=60)
-            print(f"New video of length {frames.shape[0]} at step {global_step} recorded.")
+            try:
+                # Limit video length to avoid rendering too many frames (max 500 frames ~8 seconds at 60fps)
+                max_video_frames = 500
+                # env_states is already limited to first_done[0] + 1, but cap it further for performance
+                def limit_frames(x):
+                    length = x.shape[0] if hasattr(x, 'shape') else len(x)
+                    if length > max_video_frames:
+                        return x[:max_video_frames]
+                    return x
+                env_states_limited = jax.tree.map(limit_frames, env_states)
+                frames = jax.vmap(renderer.render)(env_states_limited)
+                # currently (N, W, H, C), need (N, C, H, W)
+                frames = jnp.transpose(frames, (0, 3, 1, 2)) 
+                
+                # Use imageio directly as a fallback if moviepy is broken
+                try:
+                    import imageio
+                    video_path = f"videos/{run_name}_step_{global_step}.mp4"
+                    os.makedirs("videos", exist_ok=True)
+                    # Convert to (N, H, W, C) for imageio and to uint8
+                    io_frames = np.array(jnp.transpose(frames, (0, 2, 3, 1))).astype(np.uint8)
+                    imageio.mimsave(video_path, io_frames, fps=60, codec='libx264')
+                    print(f"Video saved to {video_path}")
+                except Exception as io_e:
+                    print(f"Warning: imageio fallback failed: {io_e}")
+
+                if args.track:
+                    # Log video directly to wandb to avoid moviepy synchronization issues
+                    # wandb expects (T, C, H, W) for the frames array
+                    # currently frames is (T, C, H, W) already
+                    wandb.log({"video": wandb.Video(np.array(frames), fps=60, format="mp4"), "global_step": global_step})
+
+                writer.add_video("video", np.array(frames)[None, ...], global_step=global_step, fps=60)
+                print(f"New video of length {frames.shape[0]} at step {global_step} recorded.")
+            except Exception as e:
+                # Gracefully handle video encoding errors (e.g., missing moviepy dependencies)
+                print(f"Warning: Failed to record video: {e}")
+                print("Tip: Install missing dependencies with: pip install imageio requests")
 
     # TRY NOT TO MODIFY: start the game
     key, reset_key = jax.random.split(key)
@@ -532,58 +566,111 @@ if __name__ == "__main__":
         (agent_state, next_obs, next_done, key, env_state), storage = jax.lax.scan(
             step_once_fn, (agent_state, next_obs, next_done, key, env_state), (), max_steps
         )
-        return agent_state, next_obs, next_done, storage, key, env_state
+        return (agent_state, next_obs, next_done, key, env_state), storage
 
     rollout = partial(rollout, step_once_fn=partial(step_once, env_step_fn=vmap_step), max_steps=args.num_steps)
 
-    rtpt = RTPT(name_initials='RE', experiment_name='PPO_JAXAtari', max_iterations=args.num_iterations)
-    rtpt.start()
-    start_time = time.time()
-    for iteration in range(1, args.num_iterations + 1):
-        rtpt.step()
+    def log_metrics(metrics, step):
+        """Callback function for logging metrics from within JAX-compiled code."""
+        # Convert JAX arrays to numpy for compatibility with TensorBoard/WandB
+        step_val = int(step)
+        for k, v in metrics.items():
+            val = float(v)
+            if "loss" in k or "entropy" in k or "kl" in k:
+                writer.add_scalar(f"losses/{k}", val, step_val)
+            else:
+                writer.add_scalar(f"charts/{k}", val, step_val)
 
-        if args.eval_during_train and iteration > 0 and iteration % args.eval_every == 0:
-           eval_and_vid(iteration, global_step) 
+    @jax.jit
+    def train_iteration(carry, iteration_idx):
+        agent_state, next_obs, next_done, env_state, key, global_step = carry
 
-        iteration_time_start = time.time()
-        agent_state, next_obs, next_done, storage, key, env_state = rollout(
+        # Rollout
+        (agent_state, next_obs, next_done, key, env_state), storage = rollout(
             agent_state, next_obs, next_done, key, env_state
         )
-        global_step += args.num_steps * args.num_envs
+
+        # GAE
         storage = compute_gae(agent_state, next_obs, next_done, storage)
+
+        # Update PPO
         agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, key = update_ppo(
             agent_state,
             storage,
             key,
         )
-        avg_episodic_return = np.mean(jax.device_get(env_state.returned_episode_returns))
-        # print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}")
+        
+        new_global_step = global_step + args.num_steps * args.num_envs
+        
+        # Compute means on GPU to minimize transfer size
+        metrics_to_log = {
+            "avg_episodic_return": jnp.mean(env_state.returned_episode_returns),
+            "avg_episodic_length": jnp.mean(env_state.returned_episode_lengths),
+            "learning_rate": agent_state.opt_state[1].hyperparams["learning_rate"],
+            "value_loss": v_loss[-1, -1],
+            "policy_loss": pg_loss[-1, -1],
+            "entropy": entropy_loss[-1, -1],
+            "approx_kl": approx_kl[-1, -1],
+            "loss": loss[-1, -1],
+        }
+        
+        # Use callback for non-blocking logging
+        def do_log(m, step):
+            jax.debug.callback(log_metrics, m, step)
 
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, global_step)
-        writer.add_scalar(
-            "charts/avg_episodic_length", np.mean(jax.device_get(env_state.returned_episode_lengths)), global_step
+        jax.lax.cond(
+            iteration_idx % args.log_interval == 0,
+            do_log,
+            lambda m, step: None,
+            metrics_to_log, new_global_step
         )
-        writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"].item(), global_step)
-        writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/approx_kl", approx_kl[-1, -1].item(), global_step)
-        writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
-        # print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-        writer.add_scalar(
-            "charts/SPS_update", int(args.num_envs * args.num_steps / (time.time() - iteration_time_start)), global_step
+
+        return (agent_state, next_obs, next_done, env_state, key, new_global_step), None
+
+    rtpt = RTPT(name_initials='RE', experiment_name='PPO_JAXAtari', max_iterations=args.num_iterations)
+    rtpt.start()
+    start_time = time.time()
+    
+    # Run in chunks to allow periodic evaluation without excessive synchronization
+    # Each chunk runs on GPU; logging happens via non-blocking callbacks
+    chunk_size = 50
+    num_chunks = args.num_iterations // chunk_size
+    remainder = args.num_iterations % chunk_size
+    
+    current_iteration = 0
+    for chunk in range(num_chunks + (1 if remainder > 0 else 0)):
+        current_chunk_size = chunk_size if chunk < num_chunks else remainder
+        
+        # Run chunk of iterations on GPU
+        # global_step is now tracked inside the scan to keep it JIT-compatible
+        (agent_state, next_obs, next_done, env_state, key, global_step), _ = jax.lax.scan(
+            train_iteration, 
+            (agent_state, next_obs, next_done, env_state, key, global_step), 
+            jnp.arange(current_iteration, current_iteration + current_chunk_size), 
+            length=current_chunk_size
         )
-        writer.add_scalar(
-            "charts/time", time.time() - start_time, global_step
-        )
+        
+        current_iteration += current_chunk_size
+        
+        # Sync RTPT (minimal overhead)
+        for _ in range(current_chunk_size):
+            rtpt.step()
+
+        # Log SPS (CPU side)
+        global_step_val = int(global_step)
+        writer.add_scalar("charts/SPS", int(global_step_val / (time.time() - start_time)), global_step_val)
+        writer.add_scalar("charts/time", time.time() - start_time, global_step_val)
+
+        # Periodic evaluation
+        if args.eval_during_train and current_iteration % args.eval_every == 0:
+            eval_and_vid(current_iteration, global_step_val)
+
     end_time = time.time()
     print("Training done.")
     print(f"Total train time: {end_time - start_time:.2f} seconds / {(end_time - start_time)/60:.2f} minutes.")
 
     if args.save_model:
-        eval_and_vid(iteration, global_step)
+        eval_and_vid(current_iteration, int(global_step))
 
         # if args.upload_model:
         #     from cleanrl_utils.huggingface import push_to_hub

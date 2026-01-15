@@ -17,6 +17,7 @@ def evaluate(
     Model: nn.Module,
     capture_video: bool = True,
     seed=1,
+    max_eval_steps: int = 2_000,
 ):
     env: JaxEnvironment | JaxatariWrapper = make_env(env_id, seed, 1)()
     _Network, _Actor, _Critic = Model
@@ -77,9 +78,10 @@ def evaluate(
         return (next_obs, env_state, keys), (first_states, done, reward) 
 
     # evaluate eval_episodes concurrently
+    # Reduced from 10_000 to 2_000 for performance - most Atari episodes finish much sooner
     reset_keys = jax.random.split(key, eval_episodes)
     next_obs, env_states = jax.vmap(wrapped_reset)(reset_keys)
-    _, (first_states, dones, rewards) = jax.lax.scan(step_fn, (next_obs, env_states, reset_keys), None, length=10_000)
+    _, (first_states, dones, rewards) = jax.lax.scan(step_fn, (next_obs, env_states, reset_keys), None, length=max_eval_steps)
 
     print("scanned rewards: ", rewards.shape, jnp.sum(rewards), jnp.mean(rewards))
     
@@ -99,7 +101,29 @@ def evaluate(
     episodic_returns = jnp.sum(rewards, axis=0)  # shape: (eval_episodes,)
 
     # first episode video capture
-    # states_until_done = first_obs[:first_done[0] + 1, 0]  # shape: (time_until_done, 1, H, W)
-    env_states_until_done = jax.tree.map(lambda x: x[:first_done[0] + 1], first_states.atari_state.atari_state.env_state)
+    # first_states has shape (time, ...) and contains wrapper states
+    # For object-centric mode: first_states is LogState -> AtariState with env_state field
+    # For pixel mode: first_states is LogState -> PixelState with atari_state.env_state
+    # Extract env_state and slice to first_done[0] + 1
+    
+    # Access env_state field from the PyTree structure
+    # We need to handle both pixel and object-centric mode structures
+    def find_env_state(state):
+        env_state = getattr(state, 'env_state', None)
+        if env_state is not None:
+            return env_state
+        atari_state = getattr(state, 'atari_state', None)
+        if atari_state is not None:
+            return find_env_state(atari_state)
+        return None
+
+    actual_env_state = find_env_state(first_states)
+    if actual_env_state is None:
+        raise AttributeError(f"Could not find env_state in {type(first_states)}")
+
+    env_states_until_done = jax.tree.map(
+        lambda x: x[:first_done[0] + 1] if hasattr(x, 'shape') and len(x.shape) > 0 else x,
+        actual_env_state
+    )
 
     return episodic_returns, env_states_until_done

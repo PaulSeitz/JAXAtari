@@ -1,16 +1,16 @@
 # This is adapted from Atari configuration 
 NAME_INITIALS: "RE"
 ALG_NAME: "pqn"
-TOTAL_TIMESTEPS: 5e7 # 1e8 == 100M, but times 4 (frame-skipping) -> pqn paper: enough to outperform Rainbow
+TOTAL_TIMESTEPS: 1e8 # 1e8 == 100M, but times 4 (frame-skipping) -> pqn paper: enough to outperform Rainbow
 TOTAL_TIMESTEPS_DECAY: 5e7 # will be used for decay functions, in case you want to test for less timesteps and keep decays same
-NUM_ENVS: 1024 #512 # parallel environments
-NUM_STEPS: 128 # steps per environment in each update
+NUM_ENVS: 64 #512 # parallel environments
+NUM_STEPS: 16 # steps per environment in each update
 # NUM_ENVS / NUM_STEPS should be 8 for original PQN (they did 128/32)
 EPS_START: 1.0
 EPS_FINISH: 0.001
 EPS_DECAY: 0.1
 NUM_EPOCHS: 5 #2 -> adapted UtD ratio
-NUM_MINIBATCHES: 128 # minibatches per epoch
+NUM_MINIBATCHES: 8 # minibatches per epoch
 NORM_TYPE: "layer_norm" # layer_norm or batch_norm
 LR: 1.0e-4
 MAX_GRAD_NORM: 10
@@ -25,14 +25,16 @@ OBJECT_CENTRIC: True
 # Apply this mod during testing
 # Set to None for training run.
 # Activate this for the final test run (or debugging)
-MOD_NAME: LazyEnemyWrapper
+#MOD_NAME: None
 
 # Note: This will massively increase compile and run time!
 # But is useful for debugging (watching the video).
 # Turn off for reported training run.
-TEST_DURING_TRAINING: False
-TEST_INTERVAL: 0.1 # in terms of total updates
-TEST_NUM_ENVS: 1024 #512
-TEST_NUM_STEPS: 10000
+TEST_DURING_TRAINING: TRUE
+TEST_INTERVAL: 1.0 # in terms of total updates
+TEST_NUM_ENVS: 32 #512
+TEST_NUM_STEPS: 20000
 EPS_TEST: 0.0 # 0 for greedy policy
 RECORD_VIDEO: True 
+
+WANDB_MODE: "online"

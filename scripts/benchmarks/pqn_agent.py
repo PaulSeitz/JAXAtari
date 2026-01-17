@@ -157,7 +157,12 @@ def make_train(config):
             env = ObjectCentricWrapper(env)
             env = FlattenObservationWrapper(env)
         else:
-            env = PixelObsWrapper(env)
+            # Enable downscaling to reduce GPU memory usage
+            # Standard Atari preprocessing: 84x84 grayscale
+            do_resize = config.get("PIXEL_RESIZE", True)
+            resize_shape = tuple(config.get("PIXEL_RESIZE_SHAPE", [84, 84]))
+            grayscale = config.get("PIXEL_GRAYSCALE", True)
+            env = PixelObsWrapper(env, do_pixel_resize=do_resize, pixel_resize_shape=resize_shape, grayscale=grayscale)
         env = NormalizeObservationWrapper(env)
         env = LogWrapper(env)
         return env

@@ -1,3 +1,7 @@
+defaults:
+  - _self_
+  - alg: pqn_jaxatari_pixel  # Must be specified: pqn_jaxatari_object, pqn_jaxatari_pixel, or ppo_jaxatari_object
+
 # experiment params
 NUM_SEEDS: 1
 SEED: 0
@@ -9,8 +13,6 @@ HYP_TUNE: False
 WANDB_MODE: "online"  # set to online to activate wandb
 ENTITY: ""
 PROJECT: ""
-alg:
-  WANDB_LOG_ALL_SEEDS: False # will log all the vmapped seeds separetely
 
 # where to save the params (if None, will not save)
 SAVE_PATH: "./models"

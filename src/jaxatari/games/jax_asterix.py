@@ -148,6 +148,7 @@ class AsterixState(NamedTuple):
     respawn_timer: chex.Array # Zählt Frames herunter bis Respawn nach Hit erfolgt
     score_popups: ScorePopup # Score Popups nach einsammeln eines Collectibles
     character_transition_timer: chex.Array # Timer für Charakterwechsel Animation
+    level: chex.Array # Current level (affects spawn delays and difficulty)
 
 
 class EntityPosition(NamedTuple):
@@ -158,7 +159,12 @@ class EntityPosition(NamedTuple):
 
 
 class AsterixObservation(NamedTuple):
-    player: EntityPosition
+    player: EntityPosition  # Single player entity
+    reward: jnp.ndarray      # Shape (8, 5) - score popups [x, y, w, h, active]
+    enemy: jnp.ndarray       # Shape (8, 5) - enemies [x, y, w, h, active]
+    consumable: jnp.ndarray  # Shape (8, 5) - collectibles [x, y, w, h, active]
+    score: jnp.ndarray       # Scalar - score value
+    lives: jnp.ndarray       # Scalar - lives value
 
 
 class AsterixInfo(NamedTuple):
@@ -245,6 +251,7 @@ class JaxAsterix(JaxEnvironment[AsterixState, AsterixObservation, AsterixInfo, A
             respawn_timer = jnp.array(0, dtype=jnp.int32),
             score_popups = score_popups,
             character_transition_timer = jnp.array(0, dtype=jnp.int32),
+            level=jnp.array(1, dtype=jnp.int32),  # Start at level 1
         )
 
         return self._get_observation(state), state
@@ -334,7 +341,9 @@ class JaxAsterix(JaxEnvironment[AsterixState, AsterixObservation, AsterixInfo, A
         enemy_w = 8
         enemy_h = 8
         screen_width = self.consts.screen_width
-        level = 1
+        # Calculate level based on score (level increases every 10,000 points)
+        # Level 1: 0-9,999, Level 2: 10,000-19,999, etc.
+        level = jnp.maximum(1, (state.score // 10000) + 1).astype(jnp.int32)
         num_platforms = self.consts.num_stages
 
         rng_enemy_spawn, rng_enemy_delay, rng_col_spawn, rng_col_delay, rng_next = jax.random.split(state.rng, 5)
@@ -680,6 +689,9 @@ class JaxAsterix(JaxEnvironment[AsterixState, AsterixObservation, AsterixInfo, A
 
         game_over = jnp.where(new_lives <= 0, jnp.array(True), state.game_over)
 
+        # Update level based on new score
+        new_level = jnp.maximum(1, (new_score // 10000) + 1).astype(jnp.int32)
+        
         new_state = AsterixState(
             player_x=new_player_x,
             player_y=new_y,
@@ -701,6 +713,7 @@ class JaxAsterix(JaxEnvironment[AsterixState, AsterixObservation, AsterixInfo, A
             respawn_timer=new_respawn_timer,
             score_popups=score_popups,
             character_transition_timer =new_transition_timer,
+            level=new_level,
         )
 
         done = self._get_done(new_state)
@@ -712,13 +725,93 @@ class JaxAsterix(JaxEnvironment[AsterixState, AsterixObservation, AsterixInfo, A
 
     @partial(jax.jit, static_argnums=(0,))
     def _get_observation(self, state: AsterixState):
-        player = EntityPosition(
-            x=state.player_x.astype(jnp.int32),
-            y=state.player_y.astype(jnp.int32),
-            width=jnp.array(self.consts.player_width, dtype=jnp.int32),
-            height=jnp.array(self.consts.player_height, dtype=jnp.int32),
+        # Player entity
+        # Size depends on character and hit state: (8, 11) for Asterix, (6, 11) for Obelix, (16, 11) when hit
+        player_width = jnp.where(
+            state.hit_timer > 0,
+            jnp.int32(16),  # Wide when dying
+            jnp.where(state.character_id == 0, jnp.int32(8), jnp.int32(6))  # Asterix=8, Obelix=6
         )
-        return AsterixObservation(player=player)
+        player_height = jnp.int32(11)
+        player = {
+            "x": state.player_x.astype(jnp.int32),
+            "y": state.player_y.astype(jnp.int32),
+            "width": player_width,
+            "height": player_height,
+        }
+        
+        # Reward entities (score popups) - shape (8, 5) [x, y, w, h, active]
+        popup_y_coords = self.renderer.popup_y_coords
+        reward_array = jnp.zeros((8, 5), dtype=jnp.int32)
+        
+        def fill_reward(i, arr):
+            active = state.score_popups.active[i]
+            x = jnp.where(active, state.score_popups.x[i], jnp.float32(0)).astype(jnp.int32)
+            y = jnp.where(active, popup_y_coords[i], jnp.int32(0)).astype(jnp.int32)
+            active_int = active.astype(jnp.int32)
+            w = jnp.int32(8)  # Reward width
+            h = jnp.int32(11)  # Reward height
+            arr = arr.at[i, 0].set(x)
+            arr = arr.at[i, 1].set(y)
+            arr = arr.at[i, 2].set(w)
+            arr = arr.at[i, 3].set(h)
+            arr = arr.at[i, 4].set(active_int)
+            return arr
+        
+        reward_array = jax.lax.fori_loop(0, 8, fill_reward, reward_array)
+        
+        # Enemy entities - shape (8, 5) [x, y, w, h, active]
+        enemy_y_coords = self.renderer.enemy_y_coords
+        enemy_array = jnp.zeros((8, 5), dtype=jnp.int32)
+        
+        def fill_enemy(i, arr):
+            active = state.enemies.alive[i]
+            x = jnp.where(active, state.enemies.x[i], jnp.float32(0)).astype(jnp.int32)
+            y = jnp.where(active, enemy_y_coords[i], jnp.int32(0)).astype(jnp.int32)
+            active_int = active.astype(jnp.int32)
+            w = jnp.int32(7)  # Enemy width
+            h = jnp.int32(11)  # Enemy height
+            arr = arr.at[i, 0].set(x)
+            arr = arr.at[i, 1].set(y)
+            arr = arr.at[i, 2].set(w)
+            arr = arr.at[i, 3].set(h)
+            arr = arr.at[i, 4].set(active_int)
+            return arr
+        
+        enemy_array = jax.lax.fori_loop(0, 8, fill_enemy, enemy_array)
+        
+        # Consumable entities (collectibles) - shape (8, 5) [x, y, w, h, active]
+        collectible_y_coords = self.renderer.collectible_y_coords
+        consumable_array = jnp.zeros((8, 5), dtype=jnp.int32)
+        
+        def fill_consumable(i, arr):
+            active = state.collectibles.alive[i]
+            x = jnp.where(active, state.collectibles.x[i], jnp.float32(0)).astype(jnp.int32)
+            y = jnp.where(active, collectible_y_coords[i], jnp.int32(0)).astype(jnp.int32)
+            active_int = active.astype(jnp.int32)
+            w = jnp.int32(7)  # Consumable width
+            h = jnp.int32(11)  # Consumable height
+            arr = arr.at[i, 0].set(x)
+            arr = arr.at[i, 1].set(y)
+            arr = arr.at[i, 2].set(w)
+            arr = arr.at[i, 3].set(h)
+            arr = arr.at[i, 4].set(active_int)
+            return arr
+        
+        consumable_array = jax.lax.fori_loop(0, 8, fill_consumable, consumable_array)
+        
+        # Score and lives as scalars
+        score = state.score.astype(jnp.int32)
+        lives = state.lives.astype(jnp.int32)
+        
+        return {
+            "player": player,
+            "reward": reward_array,
+            "enemy": enemy_array,
+            "consumable": consumable_array,
+            "score": score,
+            "lives": lives,
+        }
 
 
     @partial(jax.jit, static_argnums=(0,))
@@ -751,8 +844,12 @@ class JaxAsterix(JaxEnvironment[AsterixState, AsterixObservation, AsterixInfo, A
     def observation_space(self) -> spaces.Dict:
         # Returns the observation space for Asterix.
         # The observation contains:
-        # - player: EntityPosition (x, y, width, height)
-        # - score: int (0-99)
+        # - player: EntityPosition (x, y, width, height) - single player entity
+        # - reward: array (8, 5) - score popups [x, y, w, h, active]
+        # - enemy: array (8, 5) - enemies [x, y, w, h, active]
+        # - consumable: array (8, 5) - collectibles [x, y, w, h, active]
+        # - score: scalar - score value
+        # - lives: scalar - lives value
         return spaces.Dict({
             "player": spaces.Dict({
                 "x": spaces.Box(low=0, high=160, shape=(), dtype=jnp.int32),
@@ -760,6 +857,11 @@ class JaxAsterix(JaxEnvironment[AsterixState, AsterixObservation, AsterixInfo, A
                 "width": spaces.Box(low=0, high=160, shape=(), dtype=jnp.int32),
                 "height": spaces.Box(low=0, high=210, shape=(), dtype=jnp.int32),
             }),
+            "reward": spaces.Box(low=-50, high=250, shape=(8, 5), dtype=jnp.int32),
+            "enemy": spaces.Box(low=-50, high=250, shape=(8, 5), dtype=jnp.int32),
+            "consumable": spaces.Box(low=-50, high=250, shape=(8, 5), dtype=jnp.int32),
+            "score": spaces.Box(low=0, high=1000000, shape=(), dtype=jnp.int32),
+            "lives": spaces.Box(low=0, high=10, shape=(), dtype=jnp.int32),
         })
 
 
@@ -778,12 +880,20 @@ class JaxAsterix(JaxEnvironment[AsterixState, AsterixObservation, AsterixInfo, A
         """Render the game state to a raster image."""
         return self.renderer.render(state)
 
-    def obs_to_flat_array(self, obs: AsterixObservation) -> jnp.ndarray:
+    def obs_to_flat_array(self, obs: dict) -> jnp.ndarray:
+        # Dictionary leaves are sorted by key in JAX
+        # Keys: consumable, enemy, lives, player, reward, score
+        # player keys: height, width, x, y
         return jnp.concatenate([
-            obs.player.x.flatten(),
-            obs.player.y.flatten(),
-            obs.player.width.flatten(),
-            obs.player.height.flatten(),
+            obs["consumable"].flatten(),
+            obs["enemy"].flatten(),
+            obs["lives"].flatten(),
+            obs["player"]["height"].flatten(),
+            obs["player"]["width"].flatten(),
+            obs["player"]["x"].flatten(),
+            obs["player"]["y"].flatten(),
+            obs["reward"].flatten(),
+            obs["score"].flatten(),
         ])
 
 

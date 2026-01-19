@@ -188,7 +188,6 @@ class FreewayState(NamedTuple):
     time: chex.Array
     cooldown: chex.Array  # Cooldown after collision
     walking_frames: chex.Array
-    lives_lost: chex.Array
     game_over: chex.Array
 
 
@@ -260,7 +259,6 @@ class JaxFreeway(JaxEnvironment[FreewayState, FreewayObservation, FreewayInfo, F
             time=jnp.array(0, dtype=jnp.int32),
             cooldown=jnp.array(0, dtype=jnp.int32),
             walking_frames=jnp.array(0, dtype=jnp.int32),
-            lives_lost=jnp.array(0, dtype=jnp.int32),
             game_over=jnp.array(False, dtype=jnp.bool_),
         )
 
@@ -405,12 +403,6 @@ class JaxFreeway(JaxEnvironment[FreewayState, FreewayObservation, FreewayInfo, F
             state.game_over,
         )
 
-        new_live_lost = jnp.where(
-            any_collision,
-            state.lives_lost + 1,
-            state.lives_lost,
-        )
-
         new_state = FreewayState(
             chicken_y=new_y,
             cars=new_cars,
@@ -419,7 +411,6 @@ class JaxFreeway(JaxEnvironment[FreewayState, FreewayObservation, FreewayInfo, F
             time=new_time,
             cooldown=new_cooldown,
             walking_frames=new_walking_frames.astype(jnp.int32),
-            lives_lost=new_live_lost,
             game_over=game_over,
         )
         done = self._get_done(new_state)

@@ -16,7 +16,7 @@ import os
 
 import hydra
 from omegaconf import OmegaConf
-from train_utils import save_params
+from train_utils import save_params, video_callback, video_callback
 import jaxatari
 import wandb
 from jaxatari.wrappers import AtariWrapper, PixelObsWrapper, FlattenObservationWrapper, LogWrapper, ObjectCentricWrapper, NormalizeObservationWrapper
@@ -77,11 +77,18 @@ def make_train(config):
     config["MINIBATCH_SIZE"] = (
         config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
     )
-    env = jaxatari.make(config["ENV_NAME"].lower())
+    # Extract config values for video recording (needed before jit compilation)
+    record_video_flag = config.get("RECORD_VIDEO", False)
+    test_num_envs = config.get("TEST_NUM_ENVS", 1)
+    test_num_steps = config.get("TEST_NUM_STEPS", 10000)
+    
+    game_name = config["ENV_NAME"].lower()
+    env = jaxatari.make(game_name)
     mod_env = env
     if config.get("MOD_NAME", None) is not None:
-        mod_env = jaxatari.modify(env, config.get("ENV_NAME", None).lower(), config.get("MOD_NAME", None).lower())
-    renderer = jaxatari.make_renderer(config["ENV_NAME"].lower())
+        mod_name = config.get("MOD_NAME", None).lower()
+        mod_env = jaxatari.make(game_name, mods_config=[mod_name])
+    renderer = jaxatari.make_renderer(game_name)
 
     def apply_wrappers(env):
         env = AtariWrapper(env, episodic_life=True, frame_skip=4, frame_stack_size=4, sticky_actions=True, max_pooling=True, clip_reward=True, noop_reset=30)
@@ -137,6 +144,8 @@ def make_train(config):
 
         # TRAIN LOOP
         def _update_step(runner_state, unused):
+            train_state, env_state, last_obs, rng, update_count = runner_state
+            
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
                 train_state, env_state, last_obs, rng = runner_state
@@ -159,7 +168,7 @@ def make_train(config):
                 return runner_state, transition
 
             runner_state, traj_batch = jax.lax.scan(
-                _env_step, runner_state, None, config["NUM_STEPS"]
+                _env_step, (train_state, env_state, last_obs, rng), None, config["NUM_STEPS"]
             )
 
             # CALCULATE ADVANTAGE
@@ -280,7 +289,9 @@ def make_train(config):
             
             # Debugging mode
             if config.get("WANDB_MODE") != "disabled":
-                def callback(metrics, original_rng):
+                # Calculate actual environment steps: update_count * num_envs * num_steps
+                env_steps = update_count * config["NUM_ENVS"] * config["NUM_STEPS"]
+                def callback(metrics, original_rng, steps):
                     if config.get("WANDB_LOG_ALL_SEEDS", False):
                         metrics.update(
                             {
@@ -288,18 +299,58 @@ def make_train(config):
                                 for k, v in metrics.items()
                             }
                         )
-                    wandb.log(metrics)
+                    wandb.log(metrics, step=int(steps))
                 metrics = {k: jnp.mean(v) for k, v in metric.items()}
-                jax.debug.callback(callback, metrics, original_rng)
+                jax.debug.callback(callback, metrics, original_rng, env_steps)
 
-            runner_state = (train_state, env_state, last_obs, rng)
+            # Increment update count for next iteration
+            update_count = update_count + 1
+            runner_state = (train_state, env_state, last_obs, rng, update_count)
             return runner_state, metric
 
         rng, _rng = jax.random.split(rng)
-        runner_state = (train_state, env_state, obsv, _rng)
+        runner_state = (train_state, env_state, obsv, _rng, jnp.array(0, dtype=jnp.int32))
         runner_state, metric = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
         )
+        
+        # Record video after training if requested
+        if config.get("RECORD_VIDEO", False):
+            train_state_final, env_state_final, last_obs_final, rng_final, _ = runner_state
+            
+            def record_video(train_state, rng):
+                def _env_step(carry, _):
+                    env_state, last_obs, rng = carry
+                    rng, _rng = jax.random.split(rng)
+                    pi, value = network.apply(train_state.params, last_obs)
+                    action = pi.mode()  # Use deterministic action for video
+                    
+                    rng, _rng = jax.random.split(rng)
+                    obsv, env_state, reward, done, info = jax.vmap(env.step)(env_state, action)
+                    env_state_vid = jax.tree.map(lambda x: x[0], env_state)
+                    dones_vid = jax.tree.map(lambda x: x[0], done)
+                    return (env_state, obsv, rng), (env_state_vid, dones_vid)
+                
+                rng, _rng = jax.random.split(rng)
+                reset_keys = jax.random.split(_rng, test_num_envs)
+                init_obs, env_state = jax.vmap(env.reset)(reset_keys)
+                
+                _, output = jax.lax.scan(
+                    _env_step, (env_state, init_obs, rng), None, test_num_steps
+                )
+                env_states, dones = output[0], output[1]
+                return env_states, dones
+            
+            env_states, dones = record_video(train_state_final, rng_final)
+            jax.debug.callback(
+                video_callback, 
+                env_states, 
+                dones, 
+                config["NUM_UPDATES"], 
+                renderer, 
+                mod=False
+            )
+        
         return {"runner_state": runner_state, "metrics": metric}
 
     return train

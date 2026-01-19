@@ -8,5 +8,10 @@ env
 results/
 .DS_Store
 docs/build/
+wandb/
+models/
+runs/
+outputs/
+.cursor/
+videos/
 .python-version
-

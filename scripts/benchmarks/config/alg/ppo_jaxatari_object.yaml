@@ -18,12 +18,12 @@ VF_COEF: 0.5
 ACTIVATION: "tanh"
 
 # env specific
-ENV_NAME: "Pong"
+ENV_NAME: "Asterix"
 ENV_KWARGS: {}
 OBJECT_CENTRIC: True
-MOD_NAME: LazyEnemyWrapper
+#MOD_NAME: LazyEnemyWrapper
 
 # Testing
-TEST_NUM_ENVS: 1024
-TEST_NUM_STEPS: 10000
+TEST_NUM_ENVS: 32
+TEST_NUM_STEPS: 20000
 RECORD_VIDEO: True 

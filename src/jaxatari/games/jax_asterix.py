@@ -170,7 +170,13 @@ class AsterixObservation(NamedTuple):
 class AsterixInfo(NamedTuple):
     pass 
 
-class JaxAsterix(JaxEnvironment[AsterixState, dict, AsterixInfo, AsterixConstants]):
+class JaxAsterix(JaxEnvironment[AsterixState, AsterixObservation, AsterixInfo, AsterixConstants]):
+    # ALE minimal action set: [NOOP, UP, RIGHT, LEFT, DOWN, UPRIGHT, UPLEFT, DOWNRIGHT, DOWNLEFT]
+    ACTION_SET: jnp.ndarray = jnp.array([
+        Action.NOOP, Action.UP, Action.RIGHT, Action.LEFT, Action.DOWN,
+        Action.UPRIGHT, Action.UPLEFT, Action.DOWNRIGHT, Action.DOWNLEFT
+    ], dtype=jnp.int32)
+
     def __init__(self, consts: AsterixConstants = None):
         if consts is None:
             consts = AsterixConstants()
@@ -264,8 +270,11 @@ class JaxAsterix(JaxEnvironment[AsterixState, dict, AsterixInfo, AsterixConstant
         stage_diffs = jnp.abs(stage_borders - state.player_y)
         current_stage = jnp.argmin(stage_diffs)
 
-        # Action mapping
-        action = jnp.asarray(action, dtype=jnp.int32)
+        # Translate agent action (0,1,2,...,8) to ALE action
+        atari_action = jnp.take(self.ACTION_SET, action)
+        
+        # Lookup tables for movement: maps agent action index (0-8) to dx/dy
+        # Order matches ACTION_SET: [NOOP, UP, RIGHT, LEFT, DOWN, UPRIGHT, UPLEFT, DOWNRIGHT, DOWNLEFT]
         dx_table = jnp.array([0, 0, 1, -1, 0, 1, -1, 1, -1], dtype=jnp.int32)
         dy_table = jnp.array([0, -1, 0, 0, 1, -1, -1, 1, 1], dtype=jnp.int32)
         dx = dx_table[action]
@@ -822,7 +831,7 @@ class JaxAsterix(JaxEnvironment[AsterixState, dict, AsterixInfo, AsterixConstant
         Actions are:
         0: NOOP
         1: UP
-        2: RIGHTS
+        2: RIGHT
         3: LEFT
         4: DOWN
         5: UPRIGHT
@@ -830,7 +839,7 @@ class JaxAsterix(JaxEnvironment[AsterixState, dict, AsterixInfo, AsterixConstant
         7: DOWNRIGHT
         8: DOWNLEFT
         """
-        return spaces.Discrete(9)
+        return spaces.Discrete(len(self.ACTION_SET))
 
     def observation_space(self) -> spaces.Dict:
         # Returns the observation space for Asterix.

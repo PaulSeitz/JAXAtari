@@ -23,7 +23,6 @@ from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 from torch.utils.tensorboard import SummaryWriter
 import jaxatari
-import wandb
 from jaxatari.wrappers import NormalizeObservationWrapper, ObjectCentricWrapper, PixelObsWrapper, AtariWrapper, LogWrapper, FlattenObservationWrapper
 from jaxatari import spaces
 from ppo_jaxatari_vmap_eval import evaluate
@@ -49,9 +48,9 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "jaxatari_tests"
+    wandb_project_name: str = "cleanRL"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str = ""
     """the entity (team) of wandb's project"""
     capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
@@ -63,24 +62,25 @@ class Args:
     """whether the environment should use pixel-based observations"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
-    log_interval: int = 10
-    """how often to log the metrics to tensorboard (in num. of iterations)"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "asterix"
+    env_id: str = "pong"
     """the id of the environment"""
-    mods: tuple[str] = ()
-    total_timesteps: int = 319_979_520
+    mods: tuple[str] = ('lazy_enemy', 'random_enemy')
+    """modifications applied during training"""
+    eval_mods: tuple[str] = ()
+    """modifications to use for evaluation (if empty, fall back to `mods`)"""
+    total_timesteps: int = 10_000_000 # so with frameskip=4 -> 40M frames (?)
     """total timesteps of the experiments"""
-    learning_rate: float = 7e-4
+    learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1024
+    num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 32
+    num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -88,7 +88,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 32
+    num_minibatches: int = 4
     """the number of mini-batches"""
     update_epochs: int = 4
     """the K epochs to update the policy"""
@@ -118,7 +118,21 @@ class Args:
 
 def make_env(env_id, seed, num_envs, mods=[], pixel_based=True, eval=False):
     def thunk():
-        env = jaxatari.make(env_id, mods_config=mods)
+        # For training (eval=False), avoid applying multiple potentially conflicting
+        # mods at once. In that case, fall back to the base environment.
+        # For evaluation (eval=True), we trust the caller to pass either a single
+        # mod or an explicit list; this is used in the per-mod video generation.
+        active_mods = mods
+        if not eval and isinstance(active_mods, (list, tuple)) and len(active_mods) > 1:
+            active_mods = []
+
+        # Normalize to None or list for jaxatari.make
+        if isinstance(active_mods, (list, tuple)) and len(active_mods) == 0:
+            mods_arg = None
+        else:
+            mods_arg = active_mods
+
+        env = jaxatari.make(env_id, mods=mods_arg)
         env = AtariWrapper(
                 env,
                 episodic_life=not eval, # only active during training 
@@ -130,14 +144,15 @@ def make_env(env_id, seed, num_envs, mods=[], pixel_based=True, eval=False):
                 noop_reset=30,
                 sticky_actions=False, # seems to be default in envpool
                 first_fire=True,
-                #full_action_space=False # TODO: this is missing in jaxatari, although default is reduced action space TODO: implement full action space as option! 
+                #full_action_space=False # TODO: this is missing in jaxatari, although default is reduced action space
         )
         if pixel_based:
             env = PixelObsWrapper(
                 env,
                 do_pixel_resize=True,
                 pixel_resize_shape=(84, 84),
-                grayscale=True
+                grayscale=True,
+                use_native_downscaling=True
             )
         else:
             env = FlattenObservationWrapper(NormalizeObservationWrapper(ObjectCentricWrapper(env)))
@@ -253,8 +268,10 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    run_name = f"{args.env_id}__{args.exp_name}_{"oc" if not args.pixel_based else "pixel"}__{args.seed}__{int(time.time())}"
+    run_name = f"{args.env_id}__{args.exp_name}_{'oc' if not args.pixel_based else 'pixel'}__{args.seed}__{int(time.time())}"
     if args.track:
+        import wandb
+
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -282,7 +299,7 @@ if __name__ == "__main__":
 
     renderer = None
     if args.capture_video:
-        renderer = jaxatari.make_renderer(args.env_id)
+        renderer = env.renderer
    
     # vmap and squeeze observations in order to get (B, F, H, W, 1) -> (B, F, H, W),
     # where F is the frame stack which becomes the channel for the convolutions
@@ -486,10 +503,16 @@ if __name__ == "__main__":
             )
         print(f"model saved to {model_path}")
 
-        #TODO: fix non-pixel based model loading in evaluate
+        # Run base-environment evaluation; per-mod videos are handled separately
+        # in generate_final_video(), where mods are applied one at a time.
         episodic_returns, env_states = evaluate(
             model_path,
-            partial(make_env, mods=list(args.mods), pixel_based=args.pixel_based, eval=True),
+            partial(
+                make_env,
+                mods=[],
+                pixel_based=args.pixel_based,
+                eval=True,
+            ),
             args.env_id,
             eval_episodes=10,
             run_name=f"{run_name}-eval",
@@ -498,44 +521,138 @@ if __name__ == "__main__":
         writer.add_scalar("eval/episodic_return", np.mean(jax.device_get(episodic_returns)), global_step) 
 
         if args.capture_video and renderer is not None: 
-            try:
-                # Limit video length to avoid rendering too many frames (max 500 frames ~8 seconds at 60fps)
-                max_video_frames = 500
-                # env_states is already limited to first_done[0] + 1, but cap it further for performance
-                def limit_frames(x):
-                    length = x.shape[0] if hasattr(x, 'shape') else len(x)
-                    if length > max_video_frames:
-                        return x[:max_video_frames]
-                    return x
-                env_states_limited = jax.tree.map(limit_frames, env_states)
-                frames = jax.vmap(renderer.render)(env_states_limited)
-                # currently (N, W, H, C), need (N, C, H, W)
-                frames = jnp.transpose(frames, (0, 3, 1, 2)) 
-                
-                # Use imageio directly as a fallback if moviepy is broken
-                try:
-                    import imageio
-                    video_path = f"videos/{run_name}_step_{global_step}.mp4"
-                    os.makedirs("videos", exist_ok=True)
-                    # Convert to (N, H, W, C) for imageio and to uint8
-                    io_frames = np.array(jnp.transpose(frames, (0, 2, 3, 1))).astype(np.uint8)
-                    imageio.mimsave(video_path, io_frames, fps=60, codec='libx264')
-                    print(f"Video saved to {video_path}")
-                except Exception as io_e:
-                    print(f"Warning: imageio fallback failed: {io_e}")
+            # Mirror the pqn_agent final video behavior: log a video for the
+            # current eval environment under a consistent wandb key.
+            frames = jax.vmap(renderer.render)(env_states)
+            frames = jnp.transpose(frames, (0, 3, 1, 2))
+            video = wandb.Video(np.array(frames), fps=30, format="mp4")
+            wandb.log(
+                {
+                    f"final_video_seed{args.seed}_eval": video,
+                    f"final_return_seed{args.seed}_eval": np.mean(jax.device_get(episodic_returns)),
+                },
+                step=global_step,
+            )
+            print(f"Video (eval) logged to wandb with {frames.shape[0]} frames.")
 
-                if args.track:
-                    # Log video directly to wandb to avoid moviepy synchronization issues
-                    # wandb expects (T, C, H, W) for the frames array
-                    # currently frames is (T, C, H, W) already
-                    wandb.log({"video": wandb.Video(np.array(frames), fps=60, format="mp4"), "global_step": global_step})
+    def _generate_single_final_video(mods_config, video_label, video_index=0):
+        """Generate a single video for the given mod configuration and log it to wandb.
 
-                writer.add_video("video", np.array(frames)[None, ...], global_step=global_step, fps=60)
-                print(f"New video of length {frames.shape[0]} at step {global_step} recorded.")
-            except Exception as e:
-                # Gracefully handle video encoding errors (e.g., missing moviepy dependencies)
-                print(f"Warning: Failed to record video: {e}")
-                print("Tip: Install missing dependencies with: pip install imageio requests")
+        This mirrors pqn_agent._generate_single_final_video so that rendered videos
+        use the original color, full-resolution frames from the base environment.
+        """
+        if not args.capture_video:
+            return None
+
+        # Base env with mods (no training wrappers yet).
+        env = jaxatari.make(args.env_id.lower(), mods=mods_config)
+        renderer_local = env.renderer
+
+        # Apply wrappers just for the agent's observations, like in pqn_agent.
+        env = AtariWrapper(
+            env,
+            episodic_life=True,
+            frame_skip=4,
+            frame_stack_size=4,
+            sticky_actions=True,
+            max_pooling=True,
+            clip_reward=False,
+            noop_reset=30,
+            max_episode_length=18000,
+        )
+        if not args.pixel_based:
+            env = ObjectCentricWrapper(env)
+            env = FlattenObservationWrapper(env)
+        else:
+            env = PixelObsWrapper(
+                env,
+                do_pixel_resize=True,
+                pixel_resize_shape=(84, 84),
+                grayscale=True,
+                use_native_downscaling=True,
+            )
+        env = NormalizeObservationWrapper(env)
+        env = LogWrapper(env)
+
+        # Reset environment
+        rng = jax.random.PRNGKey(args.seed + video_index * 10000)
+        rng, reset_rng = jax.random.split(rng)
+        obs, env_state = env.reset(reset_rng)
+        obs = obs.squeeze()  # (F, H, W)
+
+        frames = []
+        total_reward = 0.0
+        max_steps = 5000
+
+        for step in range(max_steps):
+            # PPO network expects (B, F, H, W)
+            policy_obs = obs[None, ...]
+
+            hidden = network.apply(agent_state.params.network_params, policy_obs)
+            logits = actor.apply(agent_state.params.actor_params, hidden)
+            action = jnp.argmax(logits, axis=-1)[0]
+
+            rng, step_rng = jax.random.split(rng)
+            obs, env_state, reward, done, info = env.step(env_state, action)
+            obs = obs.squeeze()
+            total_reward += float(reward)
+
+            # Render frame from the underlying base Atari state, using the original renderer.
+            state_for_render = env_state
+            while hasattr(state_for_render, "atari_state"):
+                state_for_render = state_for_render.atari_state
+            if hasattr(state_for_render, "env_state"):
+                state_for_render = state_for_render.env_state
+
+            frame = renderer_local.render(state_for_render)
+            frames.append(np.array(frame, dtype=np.uint8))
+
+            if bool(done):
+                break
+
+        print(f"Final video ({video_label}): {len(frames)} frames, total reward: {total_reward:.1f}")
+
+        if len(frames) > 0:
+            frames = np.stack(frames, axis=0)
+            # (N, H, W, 3) -> (N, 3, H, W) for wandb
+            frames = np.transpose(frames, (0, 3, 1, 2))
+            video = wandb.Video(frames, fps=30, format="mp4")
+            wandb.log(
+                {
+                    f"final_video_seed{args.seed}_{video_label}": video,
+                    f"final_return_seed{args.seed}_{video_label}": total_reward,
+                }
+            )
+            print(f"Video '{video_label}' logged to wandb.")
+
+        return total_reward
+
+    def generate_final_video():
+        """Generate videos of the trained agent: one for train env, one per eval mod.
+
+        This mirrors pqn_agent.generate_final_video: first a video on the
+        training environment (no mods), then one per entry in eval_mods (or mods).
+        """
+        if not args.capture_video:
+            return
+
+        print(f"Generating final videos for seed {args.seed}...")
+
+        video_configs = []
+        # Always add train env (no mods)
+        video_configs.append(([], "train"))
+
+        # Prefer eval_mods, fall back to mods
+        eval_mods = args.eval_mods if len(args.eval_mods) > 0 else args.mods
+        if len(eval_mods) > 0:
+            mods_list = list(eval_mods)
+            for mod in mods_list:
+                mods_config = [mod] if not isinstance(mod, (list, tuple)) else list(mod)
+                mod_label = mod if isinstance(mod, str) else "_".join(str(m) for m in mods_config)
+                video_configs.append((mods_config, mod_label))
+
+        for video_index, (mods_config, video_label) in enumerate(video_configs):
+            _generate_single_final_video(mods_config, video_label, video_index)
 
     # TRY NOT TO MODIFY: start the game
     key, reset_key = jax.random.split(key)
@@ -566,111 +683,64 @@ if __name__ == "__main__":
         (agent_state, next_obs, next_done, key, env_state), storage = jax.lax.scan(
             step_once_fn, (agent_state, next_obs, next_done, key, env_state), (), max_steps
         )
-        return (agent_state, next_obs, next_done, key, env_state), storage
+        return agent_state, next_obs, next_done, storage, key, env_state
 
     rollout = partial(rollout, step_once_fn=partial(step_once, env_step_fn=vmap_step), max_steps=args.num_steps)
 
-    def log_metrics(metrics, step):
-        """Callback function for logging metrics from within JAX-compiled code."""
-        # Convert JAX arrays to numpy for compatibility with TensorBoard/WandB
-        step_val = int(step)
-        for k, v in metrics.items():
-            val = float(v)
-            if "loss" in k or "entropy" in k or "kl" in k:
-                writer.add_scalar(f"losses/{k}", val, step_val)
-            else:
-                writer.add_scalar(f"charts/{k}", val, step_val)
+    rtpt = RTPT(name_initials='RE', experiment_name='PPO_JAXAtari', max_iterations=args.num_iterations)
+    rtpt.start()
+    start_time = time.time()
+    compile_time = None
+    for iteration in range(1, args.num_iterations + 1):
+        rtpt.step()
+        if args.eval_during_train and iteration > 0 and iteration % args.eval_every == 0:
+           eval_and_vid(iteration, global_step) 
 
-    @jax.jit
-    def train_iteration(carry, iteration_idx):
-        agent_state, next_obs, next_done, env_state, key, global_step = carry
-
-        # Rollout
-        (agent_state, next_obs, next_done, key, env_state), storage = rollout(
+        iteration_time_start = time.time()
+        agent_state, next_obs, next_done, storage, key, env_state = rollout(
             agent_state, next_obs, next_done, key, env_state
         )
-
-        # GAE
+        global_step += args.num_steps * args.num_envs
         storage = compute_gae(agent_state, next_obs, next_done, storage)
-
-        # Update PPO
         agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, key = update_ppo(
             agent_state,
             storage,
             key,
         )
-        
-        new_global_step = global_step + args.num_steps * args.num_envs
-        
-        # Compute means on GPU to minimize transfer size
-        metrics_to_log = {
-            "avg_episodic_return": jnp.mean(env_state.returned_episode_returns),
-            "avg_episodic_length": jnp.mean(env_state.returned_episode_lengths),
-            "learning_rate": agent_state.opt_state[1].hyperparams["learning_rate"],
-            "value_loss": v_loss[-1, -1],
-            "policy_loss": pg_loss[-1, -1],
-            "entropy": entropy_loss[-1, -1],
-            "approx_kl": approx_kl[-1, -1],
-            "loss": loss[-1, -1],
-        }
-        
-        # Use callback for non-blocking logging
-        def do_log(m, step):
-            jax.debug.callback(log_metrics, m, step)
+        if compile_time is None:
+            compile_time = time.time()
+            print(f"Compile + first iteration time: {compile_time - start_time:.2f} seconds.")
+        avg_episodic_return = np.mean(jax.device_get(env_state.returned_episode_returns))
+        # print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}")
 
-        jax.lax.cond(
-            iteration_idx % args.log_interval == 0,
-            do_log,
-            lambda m, step: None,
-            metrics_to_log, new_global_step
+        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, global_step)
+        writer.add_scalar(
+            "charts/avg_episodic_length", np.mean(jax.device_get(env_state.returned_episode_lengths)), global_step
         )
-
-        return (agent_state, next_obs, next_done, env_state, key, new_global_step), None
-
-    rtpt = RTPT(name_initials='RE', experiment_name='PPO_JAXAtari', max_iterations=args.num_iterations)
-    rtpt.start()
-    start_time = time.time()
-    
-    # Run in chunks to allow periodic evaluation without excessive synchronization
-    # Each chunk runs on GPU; logging happens via non-blocking callbacks
-    chunk_size = 50
-    num_chunks = args.num_iterations // chunk_size
-    remainder = args.num_iterations % chunk_size
-    
-    current_iteration = 0
-    for chunk in range(num_chunks + (1 if remainder > 0 else 0)):
-        current_chunk_size = chunk_size if chunk < num_chunks else remainder
-        
-        # Run chunk of iterations on GPU
-        # global_step is now tracked inside the scan to keep it JIT-compatible
-        (agent_state, next_obs, next_done, env_state, key, global_step), _ = jax.lax.scan(
-            train_iteration, 
-            (agent_state, next_obs, next_done, env_state, key, global_step), 
-            jnp.arange(current_iteration, current_iteration + current_chunk_size), 
-            length=current_chunk_size
+        writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"].item(), global_step)
+        writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
+        writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
+        writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
+        writer.add_scalar("losses/approx_kl", approx_kl[-1, -1].item(), global_step)
+        writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
+        # print("SPS:", int(global_step / (time.time() - start_time)))
+        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        writer.add_scalar(
+            "charts/SPS_update", int(args.num_envs * args.num_steps / (time.time() - iteration_time_start)), global_step
         )
-        
-        current_iteration += current_chunk_size
-        
-        # Sync RTPT (minimal overhead)
-        for _ in range(current_chunk_size):
-            rtpt.step()
-
-        # Log SPS (CPU side)
-        global_step_val = int(global_step)
-        writer.add_scalar("charts/SPS", int(global_step_val / (time.time() - start_time)), global_step_val)
-        writer.add_scalar("charts/time", time.time() - start_time, global_step_val)
-
-        # Periodic evaluation
-        if args.eval_during_train and current_iteration % args.eval_every == 0:
-            eval_and_vid(current_iteration, global_step_val)
-
+        writer.add_scalar(
+            "charts/time", time.time() - start_time, global_step
+        )
     end_time = time.time()
     print("Training done.")
+    if compile_time is not None:
+        print(f"Run time after first iteration: {end_time - compile_time:.2f} seconds.")
     print(f"Total train time: {end_time - start_time:.2f} seconds / {(end_time - start_time)/60:.2f} minutes.")
 
     if args.save_model:
-        eval_and_vid(current_iteration, int(global_step))
+        eval_and_vid(iteration, global_step)
+        generate_final_video()
 
         # if args.upload_model:
         #     from cleanrl_utils.huggingface import push_to_hub

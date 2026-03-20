@@ -4,8 +4,8 @@ ALG_NAME: "pqn"
 TOTAL_TIMESTEPS: 5e7 # 1e8 == 100M, but times 4 (frame-skipping) -> pqn paper: enough to outperform Rainbow
 TOTAL_TIMESTEPS_DECAY: 5e7 # will be used for decay functions, in case you want to test for less timesteps and keep decays same
 NUM_ENVS: 128 # parallel environments
-NUM_STEPS: 32 # steps per environment in each update
-# NUM_ENVS / NUM_STEPS should be 8 for original PQN (they did 128/32)
+NUM_STEPS: 16 # steps per environment in each update
+# NUM_ENVS / NUM_STEPS should be 8 for original PQN (they did 128/32) -> increasing number of updates here by decreasing NUM_STEPS
 EPS_START: 1.0
 EPS_FINISH: 0.001
 EPS_DECAY: 0.1
@@ -20,19 +20,13 @@ GAMMA: 0.99  # Discount factor (PQN paper: 0.99)
 LAMBDA: 0.65  # GAE/TD-lambda parameter (PQN paper: 0.65, NOT 0.95 like standard PPO)
 
 # env specific
-ENV_NAME: "Asterix"
+ENV_NAME: "Breakout"
 ENV_KWARGS: {}
 OBJECT_CENTRIC: False
-
-# Pixel observation preprocessing (PQN paper: 84x84 grayscale, matches CleanRL standard)
-# PQN paper states: "we used its [CleanRL's] environment and neural network configuration"
-# CleanRL uses: ResizeObservation(84), GrayScaleObservation, FrameStack(4)
-PIXEL_RESIZE: True  # Enable image resizing to 84x84 (PQN paper requirement)
-PIXEL_RESIZE_SHAPE: [84, 84]  # Target image size (height, width) - PQN paper standard
-PIXEL_GRAYSCALE: True  # Convert RGB to grayscale (PQN paper requirement)
-# Note: Frame skip (4) and frame stack (4) are handled by AtariWrapper
-# Note: NormalizeObservationWrapper scales pixels from [0, 255] to [0, 1] (standard /255.0 scaling)
-# Note: CNN architecture uses hardcoded Dense(512) layer (standard Atari setup), HIDDEN_SIZE only affects object-centric mode
+PIXEL_GRAYSCALE: True
+PIXEL_RESIZE: True
+PIXEL_RESIZE_SHAPE: [84, 84]
+USE_NATIVE_DOWNSCALING: False
 # Apply this mod during testing
 # Activate this only for the test run (or debugging)
 # Set to None for final training run.

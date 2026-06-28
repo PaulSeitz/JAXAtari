@@ -3,7 +3,30 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 from jaxatari.modification import JaxAtariModController
-from jaxatari.games.mods.seaquest.seaquest_mod_plugins import DisableEnemiesMod, NoDiversMod, EnemyMinesMod, FireBallsMod, UnlimitedOxygenMod, GravityMod, RandomColorEnemiesMod
+from jaxatari.games.mods.seaquest.seaquest_mod_plugins import (
+    DisableEnemiesMod,
+    NoDiversMod,
+    EnemyMinesMod,
+    FireBallsMod,
+    UnlimitedOxygenMod,
+    GravityMod,
+    RandomColorEnemiesMod,
+    PeacefulEnemiesMod,
+    NoEnemyTorpedoesMod,
+    FasterEnemiesMod,
+    SlowerEnemiesMod,
+    ShiftLanesMod,
+    OnlySubmarinesMod,
+    OnlySharksMod,
+    VerticalOscillationMod,
+    DenseSpawnsMod,
+    FastOxygenDrainMod,
+    SlowOxygenDrainMod,
+    SurfaceSubAlwaysMod,
+    InvertedLanesMod,
+    LethalDiversMod,
+    NoEnemiesMod,
+)
 
 class SeaquestEnvMod(JaxAtariModController):
     """
@@ -13,16 +36,27 @@ class SeaquestEnvMod(JaxAtariModController):
 
     REGISTRY = {
         "disable_enemies": DisableEnemiesMod,
+        "no_enemies": NoEnemiesMod,
         "no_divers": NoDiversMod,
         "fireballs": FireBallsMod,
-        # "peaceful_enemies": PeacefulEnemiesMod,
-        # "lethal_divers": LethalDiversMod,
+        "peaceful_enemies": PeacefulEnemiesMod,
+        "lethal_divers": LethalDiversMod,
         "unlimited_oxygen": UnlimitedOxygenMod,
         "gravity": GravityMod,
         "random_color_enemies": RandomColorEnemiesMod,
-        # "polluted_water": PollutedWaterMod,
         "mines": EnemyMinesMod,
-        # "fireball": ReplaceTorpedoWithFireBallMod
+        "no_enemy_torpedoes": NoEnemyTorpedoesMod,
+        "faster_enemies": FasterEnemiesMod,
+        "slower_enemies": SlowerEnemiesMod,
+        "shift_lanes": ShiftLanesMod,
+        "only_submarines": OnlySubmarinesMod,
+        "only_sharks": OnlySharksMod,
+        "vertical_oscillation": VerticalOscillationMod,
+        "dense_spawns": DenseSpawnsMod,
+        "fast_oxygen_drain": FastOxygenDrainMod,
+        "slow_oxygen_drain": SlowOxygenDrainMod,
+        "surface_sub_always": SurfaceSubAlwaysMod,
+        "inverted_lanes": InvertedLanesMod,
     }
 
     _mod_sprite_dir = os.path.join(os.path.dirname(__file__), "seaquest", "sprites")

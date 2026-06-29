@@ -318,7 +318,9 @@ class SurfaceSubAlwaysMod(JaxAtariPostStepModPlugin):
     @partial(jax.jit, static_argnums=(0,))
     def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
         del prev_state
-        active_sub = jnp.array([159, 45, -1], dtype=jnp.int32)
+        # Match env dtype (reset uses jnp.zeros → float32); int32 here breaks noop-reset cond.
+        dtype = new_state.surface_sub_position.dtype
+        active_sub = jnp.array([159, 45, -1], dtype=dtype)
         return new_state.replace(surface_sub_position=active_sub)
 
 

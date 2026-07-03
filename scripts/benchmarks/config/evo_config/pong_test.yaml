@@ -1,17 +1,24 @@
-# Quick pipeline / PGPE smoke test on Pong.
-# Same hyperparameters as the Montezuma run, fewer generations.
+# Pong — Such et al. Deep GA, 2× paper population (A6000).
 #
 # Run:
 #   cd scripts/benchmarks
 #   PYTHONPATH=../../src python evo_agent.py --config-name pong_test
 
 defaults:
-  - evo_base
+  - such_deep_ga
   - _self_
 
 ENV_NAME: "Pong"
 NUM_GENERATIONS: 500
+POPSIZE: 10000
+NUM_ELITE_PARENTS: 20  # keep 0.2% elite ratio at 2× pop
+
+# Smaller MLP is enough for 104-d object-centric Pong obs.
+HIDDEN_SIZE: 128
+NUM_LAYERS: 2
+WANDB_LOG_EVERY: 25
+
 CLIP_REWARD: true
 MAX_FRAMES_PER_EPISODE: 108000
 VIDEO_MAX_STEPS: 3000
-CHECKPOINT_EVERY: 100
+CHECKPOINT_EVERY: 50

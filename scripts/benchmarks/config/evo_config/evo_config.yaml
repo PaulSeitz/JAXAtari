@@ -1,5 +1,4 @@
-# Default entrypoint config — forwards to the Pong smoke test.
-# Use --config-name montezuma for the full run.
+# Default entrypoint — Such et al. Deep GA on Pong.
 
 defaults:
   - pong_test

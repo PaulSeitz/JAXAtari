@@ -1,20 +1,18 @@
-# Full Montezuma's Revenge PGPE run.
+# Montezuma's Revenge — Such et al. Deep GA (A6000, pop 5000).
 #
 # Run:
 #   cd scripts/benchmarks
 #   PYTHONPATH=../../src python evo_agent.py --config-name montezuma
-#
-# At ~20-30s/generation with POPSIZE=512, 10k generations is roughly 2-3 days.
 
 defaults:
-  - evo_base
+  - such_deep_ga
   - _self_
 
 ENV_NAME: "montezumarevenge"
 NUM_GENERATIONS: 10000
 CLIP_REWARD: false
-# Cap episode length for throughput (~12.5 min of game time at 60fps, pre frame-skip).
 MAX_FRAMES_PER_EPISODE: 45000
 VIDEO_MAX_STEPS: 8000
-CHECKPOINT_EVERY: 500
+CHECKPOINT_EVERY: 100
 KEEP_CHECKPOINTS: true
+WANDB_LOG_EVERY: 10

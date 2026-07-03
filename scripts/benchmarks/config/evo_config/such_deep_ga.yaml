@@ -1,0 +1,35 @@
+# Such et al. (2017) Deep Genetic Algorithm — evosax SimpleGA.
+# https://arxiv.org/abs/1712.06567
+#
+# Population: 5000 (A6000) | Parents: top 10 (0.2%) | σ: 0.005 | Elitism: #1 clone | Crossover: none
+
+PROJECT: "JAXAtari-Evo"
+WANDB_MODE: "online"
+WANDB_LOG_EVERY: 10
+SEED: 42
+RTPT_INITIALS: "PS"
+
+HIDDEN_SIZE: 256
+NUM_LAYERS: 3
+
+ALG_NAME: "SimpleGA"
+POPSIZE: 5000
+NUM_ELITE_PARENTS: 10
+ELITISM: true
+
+ES_PARAMS:
+  sigma_init: 0.005
+  crossover_rate: 0.0
+
+FRAME_STACK_SIZE: 4
+FRAME_SKIP: 4
+EPISODIC_LIFE: true
+FIRST_FIRE: true
+NOOP_MAX: 30
+
+SAVE_PATH: "./models/evo"
+CHECKPOINT_EVERY: 100
+KEEP_CHECKPOINTS: false
+RECORD_FINAL_VIDEO: true
+VIDEO_MAX_STEPS: 5000
+VIDEO_FPS: 30

@@ -4,6 +4,7 @@
 
 PROJECT: "JAXAtari-Evo"
 WANDB_MODE: "online"
+WANDB_LOG_EVERY: 1  # log metrics every N generations (RTPT still steps each gen)
 SEED: 42
 RTPT_INITIALS: "PS"
 
@@ -13,7 +14,7 @@ NUM_LAYERS: 3
 
 # Evolution
 ALG_NAME: "PGPE"
-POPSIZE: 512  # even; 512 is a good A6000 default for Montezuma rollouts
+POPSIZE: 512  # PGPE on A6000
 
 ES_PARAMS:
   sigma_init: 0.05

@@ -57,6 +57,12 @@ def save_params(params: Dict, filename: Union[str, os.PathLike]) -> None:
     flattened_dict = flatten_dict(params, sep=',')
     save_file(flattened_dict, filename)
 
+def save_params_atomic(params: Dict, filename: Union[str, os.PathLike]) -> None:
+    filename = os.fspath(filename)
+    tmp_path = f"{filename}.tmp"
+    save_params(params, tmp_path)
+    os.replace(tmp_path, filename)
+
 def load_params(filename:Union[str, os.PathLike]) -> Dict:
     flattened_dict = load_file(filename)
     return unflatten_dict(flattened_dict, sep=",")

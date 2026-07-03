@@ -159,6 +159,11 @@ class MontezumaRevengeObservation:
     doors: ObjectObservation
     ropes: ObjectObservation
     platforms: ObjectObservation
+    ladders: ObjectObservation
+    lasers: ObjectObservation
+    room_id: jnp.ndarray
+    inventory: jnp.ndarray
+    lives: jnp.ndarray
 
 @struct.dataclass
 class MontezumaRevengeInfo:

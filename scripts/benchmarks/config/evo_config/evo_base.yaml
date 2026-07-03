@@ -1,0 +1,37 @@
+# Shared PGPE defaults for JAXAtari evolution runs.
+# Select a preset with: python evo_agent.py --config-name pong_test
+#                       python evo_agent.py --config-name montezuma
+
+PROJECT: "JAXAtari-Evo"
+WANDB_MODE: "online"
+SEED: 42
+RTPT_INITIALS: "PS"
+
+# Network (256x3 handles Montezuma's 1176-d object-centric obs)
+HIDDEN_SIZE: 256
+NUM_LAYERS: 3
+
+# Evolution
+ALG_NAME: "PGPE"
+POPSIZE: 512  # even; 512 is a good A6000 default for Montezuma rollouts
+
+ES_PARAMS:
+  sigma_init: 0.05
+  learning_rate: 0.01
+  std_lr: 0.1
+  std_max_change: 0.2
+
+# Wrappers
+FRAME_STACK_SIZE: 4
+FRAME_SKIP: 4
+EPISODIC_LIFE: true
+FIRST_FIRE: true
+NOOP_MAX: 30
+
+# Artifacts / video
+SAVE_PATH: "./models/evo"
+CHECKPOINT_EVERY: 500   # write latest.safetensors every N generations (plus gen 1)
+KEEP_CHECKPOINTS: false # also keep numbered checkpoint_genXXXXX.safetensors
+RECORD_FINAL_VIDEO: true
+VIDEO_MAX_STEPS: 5000
+VIDEO_FPS: 30

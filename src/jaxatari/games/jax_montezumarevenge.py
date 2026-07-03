@@ -934,6 +934,11 @@ class JaxMontezumaRevenge(JaxEnvironment[MontezumaRevengeState, MontezumaRevenge
             "doors": spaces.get_object_space(n=self.consts.MAX_DOORS_PER_ROOM, screen_size=screen_size),
             "ropes": spaces.get_object_space(n=self.consts.MAX_ROPES_PER_ROOM, screen_size=screen_size),
             "platforms": spaces.get_object_space(n=self.consts.MAX_PLATFORMS_PER_ROOM, screen_size=screen_size),
+            "ladders": spaces.get_object_space(n=self.consts.MAX_LADDERS_PER_ROOM, screen_size=screen_size),
+            "lasers": spaces.get_object_space(n=self.consts.MAX_LASERS_PER_ROOM, screen_size=screen_size),
+            "room_id": spaces.Box(low=0, high=32, shape=(), dtype=jnp.int32),
+            "inventory": spaces.Box(low=0, high=99, shape=(4,), dtype=jnp.int32),
+            "lives": spaces.Box(low=0, high=99, shape=(), dtype=jnp.int32),
         })
         
     def image_space(self) -> spaces.Box:
@@ -943,63 +948,140 @@ class JaxMontezumaRevenge(JaxEnvironment[MontezumaRevengeState, MontezumaRevenge
         return self.renderer.render(state)
 
     def _get_observation(self, state: MontezumaRevengeState) -> MontezumaRevengeObservation:
+        bounce_offset = jnp.where(
+            state.enemies_bouncing == 1,
+            self.consts.BOUNCE_OFFSETS[jnp.mod(state.frame_count // 4, 22)],
+            0,
+        )
+        enemy_x = jnp.where(state.enemies_active == 0, 0, state.enemies_x)
+        enemy_y = jnp.where(
+            state.enemies_active == 0,
+            0,
+            state.enemies_y - bounce_offset,
+        )
+        enemy_orientation = jnp.where(
+            state.enemies_direction == -1,
+            270.0,
+            jnp.where(state.enemies_direction == 1, 90.0, 0.0),
+        ).astype(jnp.float32)
+
         player_obs = ObjectObservation.create(
             x=jnp.array([state.player_x]),
             y=jnp.array([state.player_y]),
             width=jnp.array([self.consts.PLAYER_WIDTH]),
             height=jnp.array([self.consts.PLAYER_HEIGHT]),
-            active=jnp.array([1])
+            active=jnp.array([1]),
+            state=jnp.array(
+                [
+                    state.is_climbing
+                    + state.is_jumping * 2
+                    + state.is_falling * 4
+                    + jnp.where(state.last_rope >= 0, 8, 0),
+                ]
+            ),
+            orientation=jnp.array(
+                [jnp.where(state.player_dir == -1, 270.0, 90.0)],
+                dtype=jnp.float32,
+            ),
         )
-        
+
         enemies_obs = ObjectObservation.create(
-            x=state.enemies_x + 1,
-            y=state.enemies_y + 1 - jnp.where(state.enemies_bouncing == 1, self.consts.BOUNCE_OFFSETS[jnp.mod(state.frame_count // 4, 22)], 0),
+            x=enemy_x,
+            y=enemy_y,
             width=jnp.full(self.consts.MAX_ENEMIES_PER_ROOM, 6),
             height=jnp.full(self.consts.MAX_ENEMIES_PER_ROOM, 14),
-            active=state.enemies_active
+            active=state.enemies_active,
+            visual_id=state.enemies_type,
+            orientation=enemy_orientation,
         )
-        
+
         items_obs = ObjectObservation.create(
-            x=state.items_x,
-            y=state.items_y,
+            x=jnp.where(state.items_active == 0, 0, state.items_x),
+            y=jnp.where(state.items_active == 0, 0, state.items_y),
             width=jnp.full(self.consts.MAX_ITEMS_PER_ROOM, 6),
             height=jnp.full(self.consts.MAX_ITEMS_PER_ROOM, 8),
-            active=state.items_active
+            active=state.items_active,
+            visual_id=state.items_type,
         )
-        
+
         conveyors_obs = ObjectObservation.create(
-            x=state.conveyors_x,
-            y=state.conveyors_y,
+            x=jnp.where(state.conveyors_active == 0, 0, state.conveyors_x),
+            y=jnp.where(state.conveyors_active == 0, 0, state.conveyors_y),
             width=jnp.full(self.consts.MAX_CONVEYORS_PER_ROOM, 40),
             height=jnp.full(self.consts.MAX_CONVEYORS_PER_ROOM, 5),
-            active=state.conveyors_active
+            active=state.conveyors_active,
+            orientation=jnp.where(state.conveyors_direction == -1, 270.0, 90.0).astype(jnp.float32),
         )
 
         doors_obs = ObjectObservation.create(
-            x=state.doors_x,
-            y=state.doors_y,
+            x=jnp.where(state.doors_active == 0, 0, state.doors_x),
+            y=jnp.where(state.doors_active == 0, 0, state.doors_y),
             width=jnp.full(self.consts.MAX_DOORS_PER_ROOM, 4),
             height=jnp.full(self.consts.MAX_DOORS_PER_ROOM, 38),
-            active=state.doors_active
+            active=state.doors_active,
         )
 
         ropes_obs = ObjectObservation.create(
-            x=state.ropes_x,
-            y=state.ropes_top,
+            x=jnp.where(state.ropes_active == 0, 0, state.ropes_x),
+            y=jnp.where(state.ropes_active == 0, 0, state.ropes_top),
             width=jnp.full(self.consts.MAX_ROPES_PER_ROOM, 1),
-            height=state.ropes_bottom - state.ropes_top,
-            active=state.ropes_active
-        )
-        
-        platforms_obs = ObjectObservation.create(
-            x=state.platforms_x,
-            y=state.platforms_y,
-            width=state.platforms_width,
-            height=jnp.full(self.consts.MAX_PLATFORMS_PER_ROOM, 4),
-            active=state.platforms_active
+            height=jnp.where(
+                state.ropes_active == 0,
+                0,
+                state.ropes_bottom - state.ropes_top,
+            ),
+            active=state.ropes_active,
         )
 
-        return MontezumaRevengeObservation(player=player_obs, enemies=enemies_obs, items=items_obs, conveyors=conveyors_obs, doors=doors_obs, ropes=ropes_obs, platforms=platforms_obs)
+        platforms_obs = ObjectObservation.create(
+            x=jnp.where(state.platforms_active == 0, 0, state.platforms_x),
+            y=jnp.where(state.platforms_active == 0, 0, state.platforms_y),
+            width=jnp.where(state.platforms_active == 0, 0, state.platforms_width),
+            height=jnp.full(self.consts.MAX_PLATFORMS_PER_ROOM, 4),
+            active=jnp.logical_and(
+                state.platforms_active == 1,
+                state.platform_cycle < self.consts.PLATFORM_ACTIVE_DURATION,
+            ).astype(jnp.int32),
+        )
+
+        ladders_obs = ObjectObservation.create(
+            x=jnp.where(state.ladders_active == 0, 0, state.ladders_x),
+            y=jnp.where(state.ladders_active == 0, 0, state.ladders_top),
+            width=jnp.full(self.consts.MAX_LADDERS_PER_ROOM, 16),
+            height=jnp.where(
+                state.ladders_active == 0,
+                0,
+                state.ladders_bottom - state.ladders_top,
+            ),
+            active=state.ladders_active,
+        )
+
+        laser_active_now = jnp.logical_and(
+            jnp.greater_equal(state.laser_cycle, 0),
+            jnp.less(state.laser_cycle, 92),
+        )
+        lasers_obs = ObjectObservation.create(
+            x=jnp.where(state.lasers_active == 0, 0, state.lasers_x),
+            y=jnp.full(self.consts.MAX_LASERS_PER_ROOM, 54),
+            width=jnp.full(self.consts.MAX_LASERS_PER_ROOM, 4),
+            height=jnp.full(self.consts.MAX_LASERS_PER_ROOM, 40),
+            active=jnp.logical_and(state.lasers_active == 1, laser_active_now).astype(jnp.int32),
+        )
+
+        return MontezumaRevengeObservation(
+            player=player_obs,
+            enemies=enemies_obs,
+            items=items_obs,
+            conveyors=conveyors_obs,
+            doors=doors_obs,
+            ropes=ropes_obs,
+            platforms=platforms_obs,
+            ladders=ladders_obs,
+            lasers=lasers_obs,
+            room_id=state.room_id,
+            inventory=state.inventory,
+            lives=state.lives,
+        )
     
     def _get_info(self, state: MontezumaRevengeState) -> MontezumaRevengeInfo:
         return MontezumaRevengeInfo(lives=state.lives, room_id=state.room_id)

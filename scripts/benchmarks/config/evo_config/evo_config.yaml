@@ -1,0 +1,5 @@
+# Default entrypoint config — forwards to the Pong smoke test.
+# Use --config-name montezuma for the full run.
+
+defaults:
+  - pong_test

@@ -1,0 +1,17 @@
+# Quick pipeline / PGPE smoke test on Pong.
+# Same hyperparameters as the Montezuma run, fewer generations.
+#
+# Run:
+#   cd scripts/benchmarks
+#   PYTHONPATH=../../src python evo_agent.py --config-name pong_test
+
+defaults:
+  - evo_base
+  - _self_
+
+ENV_NAME: "Pong"
+NUM_GENERATIONS: 500
+CLIP_REWARD: true
+MAX_FRAMES_PER_EPISODE: 108000
+VIDEO_MAX_STEPS: 3000
+CHECKPOINT_EVERY: 100

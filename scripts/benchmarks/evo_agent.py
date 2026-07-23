@@ -179,27 +179,41 @@ def prepare_run_save_dir(config):
     return save_dir
 
 
-def make_checkpoint_callback(save_dir, unravel_solution, checkpoint_every, keep_checkpoints):
-    def checkpoint_callback(generation, best_solution_flat, max_return, mean_return):
-        gen = int(generation)
-        is_periodic = checkpoint_every > 0 and gen % checkpoint_every == 0
-        is_first = gen == 1
-        if not (is_periodic or is_first):
-            return
+def metrics_to_host(metrics):
+    return {k: float(v) for k, v in jax.device_get(metrics).items()}
 
-        params = unravel_solution(jax.device_get(best_solution_flat))
-        save_params_atomic(params, os.path.join(save_dir, "latest.safetensors"))
-        if keep_checkpoints:
-            save_params_atomic(
-                params,
-                os.path.join(save_dir, f"checkpoint_gen{gen:05d}.safetensors"),
-            )
-        print(
-            f"Checkpoint generation {gen}: "
-            f"return/max={float(max_return):.2f}, return/mean={float(mean_return):.2f}"
+
+def maybe_log_wandb(config, host_metrics):
+    gen = int(host_metrics["generation"])
+    log_every = config.get("WANDB_LOG_EVERY", 1)
+    if config.get("WANDB_MODE") == "disabled":
+        return
+    if gen % log_every == 0 or gen == 1:
+        wandb.log(host_metrics, step=gen)
+
+
+def maybe_checkpoint(config, save_dir, unravel_solution, es_state, host_metrics):
+    if save_dir is None:
+        return
+    gen = int(host_metrics["generation"])
+    checkpoint_every = config.get("CHECKPOINT_EVERY", 500)
+    keep_checkpoints = config.get("KEEP_CHECKPOINTS", False)
+    is_periodic = checkpoint_every > 0 and gen % checkpoint_every == 0
+    if not (is_periodic or gen == 1):
+        return
+
+    params = unravel_solution(jax.device_get(es_state.best_solution))
+    save_params_atomic(params, os.path.join(save_dir, "latest.safetensors"))
+    if keep_checkpoints:
+        save_params_atomic(
+            params,
+            os.path.join(save_dir, f"checkpoint_gen{gen:05d}.safetensors"),
         )
-
-    return checkpoint_callback
+    print(
+        f"Checkpoint generation {gen}: "
+        f"return/max={host_metrics['return/max']:.2f}, "
+        f"return/mean={host_metrics['return/mean']:.2f}"
+    )
 
 
 def build_generation_metrics(
@@ -219,9 +233,7 @@ def build_generation_metrics(
     total_env_steps = total_env_steps + env_steps_this_gen
 
     metrics = {
-        # Primary x-axis for wandb is generation (see callback_fn below).
         "generation": es_state.generation_counter,
-        # Episode return statistics (higher is better).
         "return/max": jnp.max(fitness),
         "return/mean": jnp.mean(fitness),
         "return/min": jnp.min(fitness),
@@ -230,13 +242,11 @@ def build_generation_metrics(
         "return/best_ever": -es_state.best_fitness,
         "return/frac_positive": jnp.mean(fitness > 0),
         "return/frac_nonzero": jnp.mean(fitness != 0),
-        # Environment interaction budget (compare to PQN's env_step axis).
         "env_steps/episode_mean": jnp.mean(episode_steps),
         "env_steps/episode_max": jnp.max(episode_steps),
         "env_steps/generation": env_steps_this_gen,
         "env_steps/game_frames_generation": env_steps_this_gen * frame_skip,
         "env_steps/total": total_env_steps,
-        # ES / evosax internal state (fitness is minimized inside evosax).
         "es/best_fitness": es_state.best_fitness,
         "es/best_solution_norm": es_alg_metrics["best_solution_norm"],
         "es/best_fitness_in_generation": es_alg_metrics["best_fitness_in_generation"],
@@ -256,7 +266,7 @@ def build_generation_metrics(
     return metrics, total_env_steps
 
 
-def make_train(config, rtpt_instance, save_dir=None):
+def make_train(config, save_dir=None):
     env = build_wrapped_env(config)
     network = build_policy(config, env)
 
@@ -265,51 +275,40 @@ def make_train(config, rtpt_instance, save_dir=None):
     policy_params = network.init(dummy_key, dummy_obs)
     solution = policy_params["params"]
     _, unravel_solution = jax.flatten_util.ravel_pytree(solution)
-    checkpoint_every = config.get("CHECKPOINT_EVERY", 500)
-    keep_checkpoints = config.get("KEEP_CHECKPOINTS", False)
-    checkpoint_callback = None
-    if save_dir is not None:
-        checkpoint_callback = make_checkpoint_callback(
-            save_dir,
-            unravel_solution,
-            checkpoint_every,
-            keep_checkpoints,
-        )
+    strategy, es_params, alg_name = make_strategy(config, solution)
+    use_elitism = config.get("ELITISM", False) and alg_name == "SimpleGA"
+    pop_based = is_population_based(alg_name)
 
-    def train(rng):
-        strategy, es_params, alg_name = make_strategy(config, solution)
-        use_elitism = config.get("ELITISM", False) and alg_name == "SimpleGA"
-        pop_based = is_population_based(alg_name)
+    def rollout_episode(rng_input, network_params):
+        def cond_fn(val):
+            _, _, done, _, _ = val
+            return ~done
 
-        def rollout_episode(rng_input, network_params):
-            def cond_fn(val):
-                _, _, done, _, _ = val
-                return ~done
+        def step_fn(val):
+            obs, state, _, cum_reward, n_steps = val
 
-            def step_fn(val):
-                obs, state, _, cum_reward, n_steps = val
+            logits = network.apply({"params": network_params}, obs)
+            action = jnp.argmax(logits, axis=-1)
 
-                logits = network.apply({"params": network_params}, obs)
-                action = jnp.argmax(logits, axis=-1)
+            next_obs, next_state, reward, terminated, truncated, _ = env.step(state, action)
+            done = jnp.logical_or(terminated, truncated)
 
-                next_obs, next_state, reward, terminated, truncated, _ = env.step(state, action)
-                done = jnp.logical_or(terminated, truncated)
+            return next_obs, next_state, done, cum_reward + reward, n_steps + 1
 
-                return next_obs, next_state, done, cum_reward + reward, n_steps + 1
+        obs, state = env.reset(rng_input)
+        init_val = (obs, state, False, 0.0, 0)
 
-            obs, state = env.reset(rng_input)
-            init_val = (obs, state, False, 0.0, 0)
+        final_val = jax.lax.while_loop(cond_fn, step_fn, init_val)
+        return final_val[3], final_val[4]
 
-            final_val = jax.lax.while_loop(cond_fn, step_fn, init_val)
-            return final_val[3], final_val[4]
+    vmap_rollout = jax.vmap(rollout_episode, in_axes=(0, 0))
 
-        vmap_rollout = jax.vmap(rollout_episode, in_axes=(0, 0))
+    population_init = jax.tree.map(
+        lambda x: jnp.repeat(x[None, ...], config["POPSIZE"], axis=0),
+        solution,
+    )
 
-        population_init = jax.tree.map(
-            lambda x: jnp.repeat(x[None, ...], config["POPSIZE"], axis=0),
-            solution,
-        )
-
+    def init_es(rng):
         rng, init_rng, eval_rng = jax.random.split(rng, 3)
         if pop_based:
             rngs_eval = jax.random.split(eval_rng, config["POPSIZE"])
@@ -317,73 +316,82 @@ def make_train(config, rtpt_instance, save_dir=None):
             es_state = strategy.init(init_rng, population_init, -fitness_init, es_params)
         else:
             es_state = strategy.init(init_rng, solution, es_params)
+        return es_state, rng, jnp.array(0, dtype=jnp.int32)
 
-        def generation_step(carry, _):
-            es_state, rng, total_env_steps = carry
-            rng, ask_rng, eval_rng, tell_rng = jax.random.split(rng, 4)
+    def generation_step(carry):
+        es_state, rng, total_env_steps = carry
+        rng, ask_rng, eval_rng, tell_rng = jax.random.split(rng, 4)
 
-            population, es_state = strategy.ask(ask_rng, es_state, es_params)
-            if use_elitism:
-                population = apply_elitism(
-                    population,
-                    es_state.best_solution,
-                    unravel_solution,
-                    es_state.generation_counter,
-                )
-
-            rngs_eval = jax.random.split(eval_rng, config["POPSIZE"])
-            fitness, episode_steps = vmap_rollout(rngs_eval, population)
-
-            es_state, es_alg_metrics = strategy.tell(
-                tell_rng, population, -fitness, es_state, es_params
+        population, es_state = strategy.ask(ask_rng, es_state, es_params)
+        if use_elitism:
+            population = apply_elitism(
+                population,
+                es_state.best_solution,
+                unravel_solution,
+                es_state.generation_counter,
             )
 
-            metrics, total_env_steps = build_generation_metrics(
-                fitness,
-                episode_steps,
-                es_state,
-                es_alg_metrics,
-                config,
-                total_env_steps,
-                alg_name,
-                strategy,
-            )
-            generation = metrics["generation"]
-            log_every = config.get("WANDB_LOG_EVERY", 1)
+        rngs_eval = jax.random.split(eval_rng, config["POPSIZE"])
+        fitness, episode_steps = vmap_rollout(rngs_eval, population)
 
-            def callback_fn(m, gen, log_interval):
-                if config.get("WANDB_MODE") != "disabled" and (
-                    int(gen) % int(log_interval) == 0 or int(gen) == 1
-                ):
-                    # x-axis is ES generation, not env steps (see env_steps/* metrics).
-                    host_metrics = {k: float(v) for k, v in m.items()}
-                    wandb.log(host_metrics, step=int(gen))
-                if rtpt_instance is not None:
-                    rtpt_instance.step()
-
-            jax.debug.callback(callback_fn, metrics, generation, log_every)
-            if checkpoint_callback is not None:
-                jax.debug.callback(
-                    checkpoint_callback,
-                    es_state.generation_counter,
-                    es_state.best_solution,
-                    metrics["return/max"],
-                    metrics["return/mean"],
-                )
-
-            return (es_state, rng, total_env_steps), metrics
-
-        (es_state, rng, _), metrics = jax.lax.scan(
-            generation_step,
-            (es_state, rng, jnp.array(0, dtype=jnp.int32)),
-            None,
-            length=config["NUM_GENERATIONS"],
+        es_state, es_alg_metrics = strategy.tell(
+            tell_rng, population, -fitness, es_state, es_params
         )
 
-        best_params = unravel_solution(es_state.best_solution)
-        return {"es_state": es_state, "metrics": metrics, "best_params": best_params}
+        metrics, total_env_steps = build_generation_metrics(
+            fitness,
+            episode_steps,
+            es_state,
+            es_alg_metrics,
+            config,
+            total_env_steps,
+            alg_name,
+            strategy,
+        )
+        return (es_state, rng, total_env_steps), metrics
 
-    return train
+    return init_es, generation_step, unravel_solution
+
+
+def run_evo_training(config, rng, rtpt, save_dir):
+    """Host-side generation loop — one jit'd generation at a time for visible progress."""
+    init_es, generation_step, unravel_solution = make_train(config, save_dir)
+    init_jit = jax.jit(init_es)
+    step_jit = jax.jit(generation_step)
+    num_generations = config["NUM_GENERATIONS"]
+
+    print(
+        f"Compiling init ({config.get('ALG_NAME')} | pop={config['POPSIZE']} "
+        f"| gens={num_generations})..."
+    )
+    t0 = time.perf_counter()
+    carry = jax.block_until_ready(init_jit(rng))
+    print(f"Init done ({time.perf_counter() - t0:.1f}s). Starting generations...")
+
+    rtpt.start()
+    for _ in range(num_generations):
+        t_gen = time.perf_counter()
+        carry, metrics = jax.block_until_ready(step_jit(carry))
+        gen_s = time.perf_counter() - t_gen
+
+        es_state, _, _ = carry
+        host_metrics = metrics_to_host(metrics)
+        gen = int(host_metrics["generation"])
+
+        maybe_log_wandb(config, host_metrics)
+        maybe_checkpoint(config, save_dir, unravel_solution, es_state, host_metrics)
+        rtpt.step(subtitle=f"r={host_metrics['return/mean']:.0f}")
+
+        print(
+            f"Gen {gen}/{num_generations} | "
+            f"mean={host_metrics['return/mean']:.2f} "
+            f"max={host_metrics['return/max']:.2f} "
+            f"best={host_metrics['return/best_ever']:.2f} | "
+            f"{gen_s:.1f}s"
+        )
+
+    best_params = unravel_solution(jax.device_get(carry[0].best_solution))
+    return {"es_state": carry[0], "best_params": best_params}
 
 
 def rtpt_experiment_name(config):
@@ -408,15 +416,12 @@ def single_run(config):
         experiment_name=rtpt_experiment_name(config),
         max_iterations=config["NUM_GENERATIONS"],
     )
-    rtpt.start()
 
     save_dir = prepare_run_save_dir(config)
     rng = jax.random.PRNGKey(config.get("SEED", 42))
 
-    print(f"Compiling and running {config.get('ALG_NAME')} on {config['ENV_NAME']}...")
-
-    train_jit = jax.jit(make_train(config, rtpt, save_dir))
-    outs = jax.block_until_ready(train_jit(rng))
+    print(f"Running {config.get('ALG_NAME')} on {config['ENV_NAME']}...")
+    outs = run_evo_training(config, rng, rtpt, save_dir)
     print("Training complete.")
 
     best_params = jax.device_get(outs["best_params"])

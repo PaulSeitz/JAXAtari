@@ -26,6 +26,11 @@ from jaxatari.games.mods.seaquest.seaquest_mod_plugins import (
     InvertedLanesMod,
     LethalDiversMod,
     NoEnemiesMod,
+    PenalizeDiverShootingMod,
+    PeacefulSharksOnlyMod,
+    CollectSharksOnContactMod,
+    SwapDiverEnemyLabelsMod,
+    ExtraEnemyTypeMod,
 )
 
 class SeaquestEnvMod(JaxAtariModController):
@@ -57,6 +62,14 @@ class SeaquestEnvMod(JaxAtariModController):
         "slow_oxygen_drain": SlowOxygenDrainMod,
         "surface_sub_always": SurfaceSubAlwaysMod,
         "inverted_lanes": InvertedLanesMod,
+        # Planned paper_eval additions
+        "_peaceful_sharks": PeacefulSharksOnlyMod,
+        "_collect_sharks": CollectSharksOnContactMod,
+        "collectable_sharks": ["_peaceful_sharks", "_collect_sharks"],
+        "swap_diver_enemy_labels": SwapDiverEnemyLabelsMod,
+        "extra_enemy_type": ExtraEnemyTypeMod,
+        "new_pattern": ExtraEnemyTypeMod,  # alias
+        "penalize_diver_shooting": PenalizeDiverShootingMod,
     }
 
     _mod_sprite_dir = os.path.join(os.path.dirname(__file__), "seaquest", "sprites")

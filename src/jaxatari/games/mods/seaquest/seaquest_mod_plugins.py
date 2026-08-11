@@ -376,3 +376,256 @@ class LethalDiversMod(JaxAtariPostStepModPlugin):
 # Backwards-compatible alias used in some experiment notes.
 NoEnemiesMod = DisableEnemiesMod
 
+
+class PenalizeDiverShootingMod(JaxAtariPostStepModPlugin):
+    """
+    Penalizes the player for shooting divers with the torpedo.
+
+    When the player's missile hits a diver:
+    - The diver is removed
+    - The missile is consumed
+    - Score is penalized proportionally to difficulty:
+        penalty = min(PENALTY_BASE + PENALTY_STEP * successful_rescues, PENALTY_MAX)
+    """
+
+    PENALTY_BASE = 50
+    PENALTY_STEP = 25
+    PENALTY_MAX = 500
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
+        del prev_state
+        missile_pos = new_state.player_missile_position
+        missile_active = missile_pos[2] != 0
+
+        penalty = jnp.minimum(
+            self.PENALTY_BASE + self.PENALTY_STEP * new_state.successful_rescues,
+            self.PENALTY_MAX,
+        )
+
+        missile_xy = missile_pos[:2]
+        missile_size = self._env.consts.MISSILE_SIZE
+        diver_size = self._env.consts.DIVER_SIZE
+
+        def check_diver(i, carry):
+            state, missile_gone = carry
+            diver_pos = state.diver_positions[i]
+
+            should_check = jnp.logical_and(diver_pos[2] != 0, jnp.logical_not(missile_gone))
+            collision = self._env.check_collision_single(
+                missile_xy,
+                missile_size,
+                jnp.array([diver_pos[0], diver_pos[1]]),
+                diver_size,
+            )
+            hit = jnp.logical_and(should_check, collision)
+
+            state = state.replace(
+                diver_positions=state.diver_positions.at[i].set(
+                    jnp.where(hit, jnp.zeros(3, dtype=diver_pos.dtype), diver_pos)
+                ),
+                score=jnp.where(hit, state.score - penalty, state.score),
+                player_missile_position=jnp.where(
+                    hit,
+                    jnp.zeros(3, dtype=state.player_missile_position.dtype),
+                    state.player_missile_position,
+                ),
+            )
+            return state, jnp.logical_or(missile_gone, hit)
+
+        return jax.lax.cond(
+            missile_active,
+            lambda s: jax.lax.fori_loop(0, 4, check_diver, (s, jnp.array(False)))[0],
+            lambda s: s,
+            new_state,
+        )
+
+
+class PeacefulSharksOnlyMod(JaxAtariInternalModPlugin):
+    """Internal helper: shark contact no longer kills (subs/missiles/surface still do)."""
+
+    conflicts_with = ["peaceful_enemies"]
+
+    @partial(jax.jit, static_argnums=(0,))
+    def check_player_collision(
+        self,
+        player_x,
+        player_y,
+        submarine_list,
+        shark_list,
+        surface_sub_pos,
+        enemy_projectile_list,
+        score,
+        successful_rescues,
+    ):
+        del shark_list, score
+        submarine_collisions = jnp.any(
+            self._env.check_collision_batch(
+                jnp.array([player_x, player_y]),
+                self._env.consts.PLAYER_SIZE,
+                submarine_list,
+                self._env.consts.ENEMY_SUB_SIZE,
+            )
+        )
+        surface_collision = self._env.check_collision_single(
+            jnp.array([player_x, player_y]),
+            self._env.consts.PLAYER_SIZE,
+            surface_sub_pos,
+            self._env.consts.ENEMY_SUB_SIZE,
+        )
+        missile_collisions = jnp.any(
+            self._env.check_collision_batch(
+                jnp.array([player_x, player_y]),
+                self._env.consts.PLAYER_SIZE,
+                enemy_projectile_list,
+                self._env.consts.MISSILE_SIZE,
+            )
+        )
+        collision_points = jnp.where(
+            submarine_collisions,
+            self._env.calculate_kill_points(successful_rescues),
+            jnp.where(
+                surface_collision,
+                self._env.calculate_kill_points(successful_rescues),
+                0,
+            ),
+        )
+        died = jnp.any(
+            jnp.array([submarine_collisions, missile_collisions, surface_collision])
+        )
+        return died, collision_points
+
+
+class CollectSharksOnContactMod(JaxAtariPostStepModPlugin):
+    """Post-step helper: touching a shark fills a diver slot (reverse affordance)."""
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
+        del prev_state
+        already_dying = new_state.death_counter > 0
+
+        def _collect_one(i, state):
+            shark = state.shark_positions[i]
+            active = shark[2] != 0
+            can_collect = state.divers_collected < 6
+            hit = self._env.check_collision_single(
+                jnp.array([state.player_x, state.player_y]),
+                self._env.consts.PLAYER_SIZE,
+                shark,
+                self._env.consts.SHARK_SIZE,
+            )
+            should = jnp.logical_and(
+                jnp.logical_and(jnp.logical_and(active, hit), can_collect),
+                jnp.logical_not(already_dying),
+            )
+            return state.replace(
+                shark_positions=state.shark_positions.at[i].set(
+                    jnp.where(should, jnp.zeros_like(shark), shark)
+                ),
+                divers_collected=jnp.where(
+                    should, state.divers_collected + 1, state.divers_collected
+                ),
+            )
+
+        return jax.lax.fori_loop(0, new_state.shark_positions.shape[0], _collect_one, new_state)
+
+
+class SwapDiverEnemyLabelsMod(JaxAtariInternalModPlugin):
+    """
+    Full semantic swap of diver ↔ enemy (shark) labels:
+    - sprites swapped (divers look like sharks and vice versa)
+    - object-centric observation channels swapped (first 4 enemies ↔ divers)
+    """
+
+    asset_overrides = {
+        "shark_base": "diver",
+        "diver": "shark_base",
+    }
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _get_observation(self, state: SeaquestState):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+        from jaxatari.environment import ObjectObservation
+
+        obs = JaxSeaquest._get_observation(self._env, state)
+        enemies = obs.enemies
+        divers = obs.divers
+
+        new_divers = ObjectObservation.create(
+            x=enemies.x[:4],
+            y=enemies.y[:4],
+            width=enemies.width[:4],
+            height=enemies.height[:4],
+            active=enemies.active[:4],
+            visual_id=enemies.visual_id[:4],
+            orientation=enemies.orientation[:4],
+        )
+        new_enemies = ObjectObservation.create(
+            x=jnp.concatenate([divers.x, enemies.x[4:]]),
+            y=jnp.concatenate([divers.y, enemies.y[4:]]),
+            width=jnp.concatenate([divers.width, enemies.width[4:]]),
+            height=jnp.concatenate([divers.height, enemies.height[4:]]),
+            active=jnp.concatenate([divers.active, enemies.active[4:]]),
+            visual_id=jnp.concatenate(
+                [jnp.zeros_like(divers.visual_id), enemies.visual_id[4:]]
+            ),
+            orientation=jnp.concatenate([divers.orientation, enemies.orientation[4:]]),
+        )
+        return obs.replace(divers=new_divers, enemies=new_enemies)
+
+
+class ExtraEnemyTypeMod(JaxAtariPostStepModPlugin):
+    """
+    Compositional OOD: mine visuals + synchronized multi-lane spawn bursts
+    (new enemy appearance and a new spawn pattern together).
+    """
+
+    asset_overrides = {
+        "shark_base": {
+            "name": "shark_base",
+            "type": "group",
+            "files": ["mods/mine.npy", "mods/mine.npy"],
+        },
+        "enemy_sub": {
+            "name": "enemy_sub",
+            "type": "group",
+            "files": ["mods/mine.npy", "mods/mine.npy"],
+        },
+    }
+
+    constants_overrides = {
+        "SHARK_DIFFICULTY_COLORS": jnp.array([[128, 128, 128]] * 5),
+    }
+
+    @partial(jax.jit, static_argnums=(0,))
+    def after_reset(self, obs, state: SeaquestState):
+        timers = state.spawn_state.spawn_timers
+        synced = jnp.full_like(timers, jnp.min(timers))
+        spawn = state.spawn_state.replace(spawn_timers=synced)
+        return obs, state.replace(spawn_state=spawn)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
+        del prev_state
+        timers = new_state.spawn_state.spawn_timers
+        synced = jnp.full_like(timers, jnp.min(timers))
+        spawn = new_state.spawn_state.replace(spawn_timers=synced)
+
+        # Extra vertical wobble on top of base shark motion (new motion pattern).
+        offset = (2.0 * jnp.sin(new_state.step_counter.astype(jnp.float32) * 0.25)).astype(
+            jnp.int32
+        )
+        y_min = jnp.int32(46)
+        y_max = jnp.int32(self._env.consts.PLAYER_BOUNDS[1, 1])
+
+        def _wobble(pos):
+            active = pos[2] != 0
+            new_y = jnp.clip(pos[1] + offset, y_min, y_max)
+            return jnp.where(active, pos.at[1].set(new_y), pos)
+
+        return new_state.replace(
+            spawn_state=spawn,
+            shark_positions=jax.vmap(_wobble)(new_state.shark_positions),
+            sub_positions=jax.vmap(_wobble)(new_state.sub_positions),
+        )
+

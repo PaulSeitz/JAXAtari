@@ -629,3 +629,44 @@ class ExtraEnemyTypeMod(JaxAtariPostStepModPlugin):
             sub_positions=jax.vmap(_wobble)(new_state.sub_positions),
         )
 
+
+class NoSurfacingDeathMod(JaxAtariInternalModPlugin):
+    """Surfacing with 0 divers no longer costs a life.
+
+    Collisions, oxygen-out, and the 1–5 diver deposit tax are unchanged.
+    Divers collected is clamped at 0 so a 0-diver surface does not go negative.
+    """
+
+    @partial(jax.jit, static_argnums=(0,))
+    def update_oxygen(self, state, player_x, player_y, player_missile_position):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        (
+            new_oxygen,
+            player_x,
+            player_y,
+            player_missile_position,
+            oxygen_depleted,
+            _lose_life,
+            new_divers_collected,
+            should_reset,
+            new_just_surfaced,
+            new_difficulty,
+        ) = JaxSeaquest.update_oxygen(
+            self._env, state, player_x, player_y, player_missile_position
+        )
+        del _lose_life
+        return (
+            new_oxygen,
+            player_x,
+            player_y,
+            player_missile_position,
+            oxygen_depleted,
+            jnp.array(False),
+            jnp.maximum(new_divers_collected, jnp.int32(0)),
+            should_reset,
+            new_just_surfaced,
+            new_difficulty,
+        )
+
+

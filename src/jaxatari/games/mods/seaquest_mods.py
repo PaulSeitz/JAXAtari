@@ -31,6 +31,7 @@ from jaxatari.games.mods.seaquest.seaquest_mod_plugins import (
     CollectSharksOnContactMod,
     SwapDiverEnemyLabelsMod,
     ExtraEnemyTypeMod,
+    NoSurfacingDeathMod,
 )
 
 class SeaquestEnvMod(JaxAtariModController):
@@ -70,6 +71,7 @@ class SeaquestEnvMod(JaxAtariModController):
         "extra_enemy_type": ExtraEnemyTypeMod,
         "new_pattern": ExtraEnemyTypeMod,  # alias
         "penalize_diver_shooting": PenalizeDiverShootingMod,
+        "no_surfacing_death": NoSurfacingDeathMod,
     }
 
     _mod_sprite_dir = os.path.join(os.path.dirname(__file__), "seaquest", "sprites")

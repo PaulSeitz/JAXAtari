@@ -43,18 +43,17 @@ class NoDiversMod(JaxAtariInternalModPlugin):
             rng: chex.PRNGKey
         ):
         """
-        Override for _diver_step (or equivalent logic function).
-        We return off-screen positions and inactive flags.
+        Override for step_diver_movement: clear all diver slots.
+
+        Diver activity is ``direction != 0`` (see jax_seaquest._get_observation).
+        Filling with ``-1`` left divers *active* at clipped (0, 0) — a ceiling
+        COLLECT ghost. Use zeros so slots are inactive, matching DisableEnemiesMod.
         """
-        
-        # We assume the diver step returns: 
-        # (new_positions, new_actives, new_timers, score_addition)
-        
         return (
-            jnp.full_like(diver_positions, -1), 
-            state_divers_collected,  
+            jnp.zeros_like(diver_positions),
+            state_divers_collected,
             spawn_state,
-            rng
+            rng,
         )
 
     @partial(jax.jit, static_argnums=(0,))

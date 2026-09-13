@@ -203,6 +203,13 @@ class AtariWrapper(JaxatariWrapper):
             if hasattr(state.env_state, "lives"):
                 condition = jnp.logical_and(state.env_state.lives > 0, new_env_state.lives < state.env_state.lives)
                 terminated = jnp.logical_or(terminated, condition)
+            elif hasattr(state.env_state, "lives_remaining"):
+                # Name This Game (and similar) use lives_remaining instead of lives
+                condition = jnp.logical_and(
+                    state.env_state.lives_remaining > 0,
+                    new_env_state.lives_remaining < state.env_state.lives_remaining,
+                )
+                terminated = jnp.logical_or(terminated, condition)
             elif hasattr(state.env_state, "lives_lost"):
                 terminated = jnp.logical_or(terminated, new_env_state.lives_lost > state.env_state.lives_lost)
 

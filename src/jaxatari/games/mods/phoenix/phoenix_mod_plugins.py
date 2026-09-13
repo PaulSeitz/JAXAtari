@@ -3,6 +3,40 @@ import jax.numpy as jnp
 from jaxatari.games.jax_phoenix import PhoenixState
 
 
+def _reshuffled_formation_x() -> jnp.ndarray:
+    """Horizontally mirror Phoenix formation X slots (unused slots stay -1)."""
+    orig = jnp.array(
+        [
+            [66, 90, 53, 104, 53, 104, 66, 90],
+            [61, 75, 54, 82, 47, 89, 40, 96],
+            [122, 129, 143, 127, 54, 49, 45, -1],
+            [71, 97, 49, 105, 55, 105, 59, -1],
+            [72, -1, -1, -1, -1, -1, -1, -1],
+        ],
+        dtype=jnp.float32,
+    )
+    enemy_w = jnp.float32(6.0)
+    screen_w = jnp.float32(160.0)
+    mirrored = jnp.where(orig < 0, orig, screen_w - enemy_w - orig)
+    # Reverse slot order so pairings / dive lanes also reshape.
+    return mirrored[:, ::-1]
+
+
+def _reshuffled_formation_y() -> jnp.ndarray:
+    """Reverse slot Y order within each formation (layout change, same altitudes)."""
+    orig = jnp.array(
+        [
+            [33, 33, 51, 51, 69, 69, 87, 87],
+            [32, 32, 50, 50, 68, 68, 86, 86],
+            [32, 52, 63, 89, 106, 125, 143, 230],
+            [29, 47, 64, 82, 100, 119, 136, 230],
+            [76, 230, 230, 230, 230, 230, 230, 230],
+        ],
+        dtype=jnp.float32,
+    )
+    return orig[:, ::-1]
+
+
 class BossLateMissilesMod(JaxAtariInternalModPlugin):
     """
     Make boss missiles appear a few pixels after spawn so they are visible
@@ -135,4 +169,14 @@ class BloodMoonMod(JaxAtariInternalModPlugin):
         'RGB_PHOENIX_MAIN': (255, 50, 50),
         'RGB_BATS_BLUE': (150, 0, 0),
         'RGB_BATS_RED': (255, 100, 100),
+    }
+
+
+class FormationReshuffleMod(JaxAtariInternalModPlugin):
+    """Bucket B layout probe: same enemies, mirrored/reordered formation slots."""
+
+    name = "formation_reshuffle"
+    constants_overrides = {
+        "ENEMY_POSITIONS_X": _reshuffled_formation_x(),
+        "ENEMY_POSITIONS_Y": _reshuffled_formation_y(),
     }

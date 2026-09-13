@@ -111,6 +111,35 @@ class SeaquestConstants(AutoDerivedConstants):
     SCORE_OXYGEN_STEP: jnp.ndarray = struct.field(pytree_node=False, default_factory=lambda: jnp.array(10))
     SCORE_OXYGEN_MAX: jnp.ndarray = struct.field(pytree_node=False, default_factory=lambda: jnp.array(90))
 
+    # --- SPAWN / DIVER CADENCE ---
+    # Lane spawn_timers count down each frame.
+    #   - Divers: eligible when timer == DIVER_SPAWN_TIMER_TRIGGER and diver_array == 1
+    #   - Enemies: new wave when timer == 0 and lane empty.
+    # Pattern selection (singles → pairs → …) is driven only by rescue difficulty;
+    # do not escalate patterns per cleared wave.
+    # Reload is the original shared cadence (200). Timing-only tweaks belong here,
+    # not in get_pattern_for_difficulty / initialize_new_spawn_cycle.
+    SPAWN_TIMER_RELOAD: jnp.ndarray = struct.field(
+        pytree_node=False, default_factory=lambda: jnp.array(200, dtype=jnp.int32)
+    )
+    ENEMY_SPAWN_TIMER_RELOAD: jnp.ndarray = struct.field(
+        pytree_node=False, default_factory=lambda: jnp.array(200, dtype=jnp.int32)
+    )
+    DIVER_WAVE_SPAWN_TIMER_RELOAD: jnp.ndarray = struct.field(
+        pytree_node=False, default_factory=lambda: jnp.array(200, dtype=jnp.int32)
+    )
+    DIVER_SPAWN_TIMER_TRIGGER: jnp.ndarray = struct.field(
+        pytree_node=False, default_factory=lambda: jnp.array(60, dtype=jnp.int32)
+    )
+    INITIAL_SPAWN_TIMERS: jnp.ndarray = struct.field(
+        pytree_node=False,
+        default_factory=lambda: jnp.array([277, 277, 277, 337], dtype=jnp.int32),
+    )
+    SURFACE_FREEZE_SPAWN_TIMERS: jnp.ndarray = struct.field(
+        pytree_node=False,
+        default_factory=lambda: jnp.array([80, 80, 80, 120], dtype=jnp.int32),
+    )
+
     # Asset config baked into constants (immutable default) for asset overrides
     ASSET_CONFIG: tuple = struct.field(pytree_node=False, default_factory=lambda: _get_default_asset_config())
 
@@ -228,18 +257,26 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
             prev_sub=jnp.zeros(
                 4, dtype=jnp.int32
             ),  # Track previous entity type (0 if shark, 1 if sub) -> starts at 1 since the first wave is sharks
-            spawn_timers=jnp.array(
-                [277, 277, 277, 277 + 60], dtype=jnp.int32
-            ),  # All lanes start with same timer
+            spawn_timers=jnp.array(self.consts.INITIAL_SPAWN_TIMERS, dtype=jnp.int32),
             diver_array=jnp.array([1, 1, 0, 0], dtype=jnp.int32),
             lane_directions=self.consts.FIRST_WAVE_DIRS.astype(jnp.int32),  # First wave directions
         )
 
 
     def soft_reset_spawn_state(self, spawn_state: SpawnState) -> SpawnState:
-        """Reset spawn_times"""
+        """Reset spawn timers after a life / stage reset."""
         return spawn_state.replace(
-            spawn_timers=jnp.array([277, 277, 277, 277], dtype=jnp.int32)
+            spawn_timers=jnp.array(self.consts.INITIAL_SPAWN_TIMERS, dtype=jnp.int32)
+        )
+
+    def spawn_timer_reload(self, diver_array: chex.Array) -> chex.Array:
+        """Per-lane timer reload after clear / new wave / survive-off.
+
+        Shared SPAWN_TIMER_RELOAD for all lanes (original cadence). Pattern
+        composition is independent; only tune this constant for spawn spacing.
+        """
+        return jnp.broadcast_to(
+            self.consts.SPAWN_TIMER_RELOAD.astype(jnp.int32), diver_array.shape
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -364,8 +401,12 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         shark_lanes_hit, sub_lanes_hit = lane_had_collision_8[:4], lane_had_collision_8[4:]
         lane_had_collision_4 = jnp.where(spawn_state.prev_sub.astype(bool), sub_lanes_hit, shark_lanes_hit) # Shape (4,)
 
-        # Update Spawn Timers for the 4 physical lanes
-        new_spawn_timers = jnp.where(lane_had_collision_4, 200, spawn_state.spawn_timers)
+        # Update Spawn Timers for the 4 physical lanes (short reload if no diver)
+        new_spawn_timers = jnp.where(
+            lane_had_collision_4,
+            self.spawn_timer_reload(spawn_state.diver_array),
+            spawn_state.spawn_timers,
+        )
 
         # Update Lane Directions for the 4 physical lanes
         rng_key, dir_rng_key = jax.random.split(rng_key)
@@ -619,7 +660,9 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
             # Update the difficulty patterns for this lane
             left_over = jnp.any(lane_survived)
             clipped_difficulty = spawn_state.difficulty % 8
-            # Update spawn state
+            # Pattern is selected from rescue difficulty only (wave 0 = single,
+            # then 2-adj / gap / three). Do not escalate per cleared wave —
+            # that broke wave-1 singles and within-wave pattern consistency.
             lane_specific_pattern = jnp.where(
                 jnp.logical_not(left_over),  # Only update if all destroyed
                 jnp.where(
@@ -705,7 +748,9 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
                 to_be_spawned=new_full_to_be_spawned,
                 survived=new_survived_full,
                 prev_sub=spawn_state.prev_sub.at[i].set(is_sub),
-                spawn_timers=spawn_state.spawn_timers.at[i].set(200),
+                spawn_timers=spawn_state.spawn_timers.at[i].set(
+                    self.spawn_timer_reload(spawn_state.diver_array)[i]
+                ),
                 diver_array=spawn_state.diver_array,
                 lane_directions=spawn_state.lane_directions,
             )
@@ -841,14 +886,14 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
             # determine if we need to initialize a new pattern or keep spawning for the current one
             # do this by checking in the relevant part of the to_be_spawned array if there are still 1s
             relevant_to_be_spawned = jax.lax.dynamic_slice(
-                spawn_state.to_be_spawned, (base_idx,), (3,)
+                loc_spawn_state.to_be_spawned, (base_idx,), (3,)
             )
 
             # if there are still 1s in the relevant part of the to_be_spawned array, keep spawning
             keep_spawning = jnp.any(relevant_to_be_spawned)
 
-            # check the lane spawn timer
-            lane_timer = spawn_state.spawn_timers[i]
+            # check the lane spawn timer (use decremented timers from carry)
+            lane_timer = loc_spawn_state.spawn_timers[i]
 
             base_idx = i * 3
             # Get the sharks and subs for the current lane `i`
@@ -1045,7 +1090,11 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
             jnp.logical_and(survived_mask_lanes, old_survived_lanes == 0), axis=1
         )
 
-        random_directions = jax.random.bernoulli(direction_rng, 0.5, (num_lanes,)).astype(spawn_state.survived.dtype) * 2 - 1
+        # lane_directions uses 0=right, 1=left (same as missile-kill path). Do not
+        # write ±1 here — spawn checks `lane_directions[i] == 1` for left.
+        random_directions = jax.random.bernoulli(
+            direction_rng, 0.5, (num_lanes,)
+        ).astype(jnp.int32)
         temp_lane_directions = jnp.where(
             any_newly_survived_in_lane,
             random_directions,
@@ -1098,7 +1147,7 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         )
         new_spawn_timers = jnp.where(
             any_newly_survived_final,
-            200,
+            self.spawn_timer_reload(new_diver_array),
             spawn_state.spawn_timers
         )
 
@@ -1134,7 +1183,7 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         # --- 1. Vectorized Pre-computation and Checks (for all 4 lanes at once) ---
 
         # Condition: Only process lanes where the spawn timer is at the trigger value.
-        timers_ready_mask = spawn_state.spawn_timers == 60  # Shape: (4,)
+        timers_ready_mask = spawn_state.spawn_timers == self.consts.DIVER_SPAWN_TIMER_TRIGGER  # Shape: (4,)
 
         # Condition: A diver must not already exist in the lane.
         diver_exists_mask = diver_positions[:, 2] != 0  # Shape: (4,)
@@ -1534,12 +1583,17 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
             0, diver_positions.shape[0], move_single_diver, initial_carry
         )
 
-        # Handle case where all divers are collected - set all lanes to -1
-        # Apply the reset only if all divers have been collected
+        # When every lane's diver flag is 0, re-arm escorts for the next cycle.
+        # Arm only 2 of 4 lanes (same density as the opening [1,1,0,0]).
+        # Arming all four with SPAWN_TIMER_RELOAD=200 over-produces divers vs ALE
+        # (~1.45× divers/1k in play logs) without helping enemy pressure.
+        rng, rearm_rng = jax.random.split(rng)
+        lane_perm = jax.random.permutation(rearm_rng, 4)
+        rearm_mask = jnp.zeros(4, dtype=jnp.int32).at[lane_perm[:2]].set(-1)
         reset_array = jnp.where(
             jnp.all(final_diver_array == 0),
-            jnp.array([-1, -1, -1, -1], dtype=jnp.int32),  # Randomized reset array
-            final_diver_array,  # Otherwise keep current state
+            rearm_mask,
+            final_diver_array,
         )
 
         # Create updated spawn state
@@ -2429,7 +2483,9 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
             new_spawn_state = jax.lax.cond(
                 should_block,
                 lambda: state.spawn_state.replace(
-                    spawn_timers=jnp.array([80, 80, 80, 120], dtype=jnp.int32)
+                    spawn_timers=jnp.array(
+                        self.consts.SURFACE_FREEZE_SPAWN_TIMERS, dtype=jnp.int32
+                    )
                 ),
                 lambda: state.spawn_state,
             )

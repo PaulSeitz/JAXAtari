@@ -11,6 +11,7 @@ from jaxatari.games.mods.phoenix.phoenix_mod_plugins import (
     InvertedColorsMod,
     MatrixMod,
     BloodMoonMod,
+    FormationReshuffleMod,
 )
 
 
@@ -31,6 +32,7 @@ class PhoenixEnvMod(JaxAtariModController):
         "inverted_colors": InvertedColorsMod,
         "matrix_theme": MatrixMod,
         "blood_moon": BloodMoonMod,
+        "formation_reshuffle": FormationReshuffleMod,
     }
 
     def __init__(

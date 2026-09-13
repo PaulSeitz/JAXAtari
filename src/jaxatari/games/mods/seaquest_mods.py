@@ -32,6 +32,21 @@ from jaxatari.games.mods.seaquest.seaquest_mod_plugins import (
     SwapDiverEnemyLabelsMod,
     ExtraEnemyTypeMod,
     NoSurfacingDeathMod,
+    MirrorDiversMod,
+    MirrorWorldMod,
+    InvertedControlsMod,
+    MomentumMod,
+    SparseWorldMod,
+    TinyDiversMod,
+    DynamicLaneDriftMod,
+    ContinuousRandomSpawnsMod,
+    OceanCurrentsMod,
+    ErraticEnemiesMod,
+    MicroSwarmMod,
+    StickyWaterMod,
+    GhostSharksMod,
+    SlipperyTurnMod,
+    LaneScrambleMod,
 )
 
 class SeaquestEnvMod(JaxAtariModController):
@@ -72,6 +87,24 @@ class SeaquestEnvMod(JaxAtariModController):
         "new_pattern": ExtraEnemyTypeMod,  # alias
         "penalize_diver_shooting": PenalizeDiverShootingMod,
         "no_surfacing_death": NoSurfacingDeathMod,
+        # Paper-eval grid (MODS_PLAN §5)
+        "mirror_divers": MirrorDiversMod,
+        "mirror_world": MirrorWorldMod,
+        "inverted_controls": InvertedControlsMod,
+        "momentum": MomentumMod,
+        "sparse_world": SparseWorldMod,
+        "tiny_divers": TinyDiversMod,
+        # Extra layout / kinematics / object-set probes
+        "dynamic_lane_drift": DynamicLaneDriftMod,
+        "continuous_random_spawns": ContinuousRandomSpawnsMod,
+        "ocean_currents": OceanCurrentsMod,
+        "erratic_enemies": ErraticEnemiesMod,
+        "micro_swarm": MicroSwarmMod,
+        # High-leverage extras
+        "sticky_water": StickyWaterMod,
+        "ghost_sharks": GhostSharksMod,
+        "slippery_turn": SlipperyTurnMod,
+        "lane_scramble": LaneScrambleMod,
     }
 
     _mod_sprite_dir = os.path.join(os.path.dirname(__file__), "seaquest", "sprites")
@@ -82,6 +115,7 @@ class SeaquestEnvMod(JaxAtariModController):
                  allow_conflicts: bool = False
                  ):
         self._has_random_color = "random_color_enemies" in mods_config
+        self._has_mirror_world = "mirror_world" in mods_config
         super().__init__(
             env=env,
             mods_config=mods_config,
@@ -159,6 +193,10 @@ class SeaquestEnvMod(JaxAtariModController):
                 color_id=renderer.BACKGROUND[0, 0]
             )
             
-            return jr.render_from_palette(raster, renderer.PALETTE)
+            img = jr.render_from_palette(raster, renderer.PALETTE)
+        else:
+            img = self._env.render(state)
 
-        return self._env.render(state)
+        if self._has_mirror_world:
+            img = img[:, ::-1]
+        return img

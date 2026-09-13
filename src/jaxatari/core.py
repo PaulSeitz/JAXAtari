@@ -59,6 +59,7 @@ GAME_MODULES = {
     "qbert": "jaxatari.games.jax_qbert",
     "riverraid": "jaxatari.games.jax_riverraid",
     "seaquest": "jaxatari.games.jax_seaquest",
+    "old_seaquest": "jaxatari.games.jax_old_seaquest",
     "sirlancelot": "jaxatari.games.jax_sirlancelot",
     "skiing": "jaxatari.games.jax_skiing",
     "slotmachine": "jaxatari.games.jax_slotmachine",
@@ -88,6 +89,8 @@ MOD_MODULES = {
     "freeway": "jaxatari.games.mods.freeway_mods.FreewayEnvMod",
     "breakout": "jaxatari.games.mods.breakout_mods.BreakoutEnvMod",
     "seaquest": "jaxatari.games.mods.seaquest_mods.SeaquestEnvMod",
+    # Same robustness mods as seaquest (spawn cadence differs in the base env only).
+    "old_seaquest": "jaxatari.games.mods.seaquest_mods.SeaquestEnvMod",
     "videopinball": "jaxatari.games.mods.videopinball_mods.VideoPinballEnvMod",
     'tennis': "jaxatari.games.mods.tennis_mods.TennisEnvMod",
     "fishingderby": "jaxatari.games.mods.fishingderby_mods.FishingDerbyEnvMod",

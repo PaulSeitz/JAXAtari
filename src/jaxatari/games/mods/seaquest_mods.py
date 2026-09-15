@@ -8,6 +8,9 @@ from jaxatari.games.mods.seaquest.seaquest_mod_plugins import (
     NoDiversMod,
     EnemyMinesMod,
     FireBallsMod,
+    ChangeBackgroundColorMod,
+    GrayscaleMod,
+    InvertedColorsMod,
     UnlimitedOxygenMod,
     GravityMod,
     RandomColorEnemiesMod,
@@ -59,13 +62,16 @@ class SeaquestEnvMod(JaxAtariModController):
         "disable_enemies": DisableEnemiesMod,
         "no_enemies": NoEnemiesMod,
         "no_divers": NoDiversMod,
-        "fireballs": FireBallsMod,
         "peaceful_enemies": PeacefulEnemiesMod,
         "lethal_divers": LethalDiversMod,
         "unlimited_oxygen": UnlimitedOxygenMod,
         "gravity": GravityMod,
         "random_color_enemies": RandomColorEnemiesMod,
         "mines": EnemyMinesMod,
+        "fireballs": FireBallsMod,
+        "change_background_color": ChangeBackgroundColorMod,
+        "grayscale": GrayscaleMod,
+        "inverted_colors": InvertedColorsMod,
         "no_enemy_torpedoes": NoEnemyTorpedoesMod,
         "faster_enemies": FasterEnemiesMod,
         "slower_enemies": SlowerEnemiesMod,
@@ -116,6 +122,8 @@ class SeaquestEnvMod(JaxAtariModController):
                  ):
         self._has_random_color = "random_color_enemies" in mods_config
         self._has_mirror_world = "mirror_world" in mods_config
+        self._has_grayscale = "grayscale" in mods_config
+        self._has_inverted_colors = "inverted_colors" in mods_config
         super().__init__(
             env=env,
             mods_config=mods_config,
@@ -199,4 +207,17 @@ class SeaquestEnvMod(JaxAtariModController):
 
         if self._has_mirror_world:
             img = img[:, ::-1]
+        if self._has_inverted_colors:
+            # Keep alpha (if present) untouched; Seaquest frames are usually RGB.
+            if img.shape[-1] == 4:
+                img = img.at[..., :3].set(255 - img[..., :3])
+            else:
+                img = 255 - img
+        if self._has_grayscale:
+            if img.shape[-1] >= 3:
+                r = img[..., 0].astype(jnp.float32)
+                g = img[..., 1].astype(jnp.float32)
+                b = img[..., 2].astype(jnp.float32)
+                gray = (0.299 * r + 0.587 * g + 0.114 * b).astype(img.dtype)
+                img = img.at[..., 0].set(gray).at[..., 1].set(gray).at[..., 2].set(gray)
         return img

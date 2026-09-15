@@ -68,23 +68,22 @@ class NoDiversMod(JaxAtariInternalModPlugin):
 class EnemyMinesMod(JaxAtariInternalModPlugin):
     """
     Replaces both Sharks and Enemy Submarines with Mine sprites.
-    
-    This is a visual-only mod. Hitboxes and movement logic remain identical 
-    to the original enemies. The 'Sharks' (now Mines) will not change color 
-    based on difficulty level due to the game's rendering logic.
+
+    Visual-only: hitboxes and movement stay identical. Shark difficulty
+    recolor is forced gray so palette remaps do not resurrect shark greens.
     """
 
     asset_overrides = {
         "shark_base": {
-            'name': 'shark_base',
-            'type': 'group',
-            'files': ['mods/mine.npy', 'mods/mine.npy']
+            "name": "shark_base",
+            "type": "group",
+            "files": ["mine.npy", "mine.npy"],
         },
         "enemy_sub": {
-            'name': 'enemy_sub',
-            'type': 'group',
-            'files': ['mods/mine.npy', 'mods/mine.npy']
-        }
+            "name": "enemy_sub",
+            "type": "group",
+            "files": ["mine.npy", "mine.npy"],
+        },
     }
 
     constants_overrides = {
@@ -94,12 +93,71 @@ class EnemyMinesMod(JaxAtariInternalModPlugin):
 
 class FireBallsMod(JaxAtariInternalModPlugin):
     """
-    Replaces both Sharks and Enemy Submarines with Mine sprites.
-    
-    This is a visual-only mod. Hitboxes and movement logic remain identical 
-    to the original enemies. The 'Sharks' (now Mines) will not change color 
-    based on difficulty level due to the game's rendering logic.
+    Replaces sharks and enemy subs with the tiny fireball sprite (hard shape OOD).
+
+    Visual-only: dynamics/hitboxes unchanged. Intended as a stronger appearance
+    stress than shark recolor; expect pixel agents to collapse harder than mines.
     """
+
+    asset_overrides = {
+        "shark_base": {
+            "name": "shark_base",
+            "type": "group",
+            "files": ["fireball.npy", "fireball.npy"],
+        },
+        "enemy_sub": {
+            "name": "enemy_sub",
+            "type": "group",
+            "files": ["fireball.npy", "fireball.npy", "fireball.npy"],
+        },
+    }
+
+    constants_overrides = {
+        "SHARK_DIFFICULTY_COLORS": jnp.array([[255, 80, 0]] * 5),
+    }
+
+
+def _solid_seaquest_background(rgb: tuple[int, int, int]) -> "np.ndarray":
+    """Full-frame solid background (Seaquest playfield is 210×160)."""
+    import numpy as np
+
+    h, w = 210, 160
+    out = np.empty((h, w, 4), dtype=np.uint8)
+    out[..., 0] = rgb[0]
+    out[..., 1] = rgb[1]
+    out[..., 2] = rgb[2]
+    out[..., 3] = 255
+    return out
+
+
+class ChangeBackgroundColorMod(JaxAtariInternalModPlugin):
+    """Replace the ocean background with a solid magenta playfield (visual-only)."""
+
+    _NEW_BG = (180, 0, 180)
+
+    constants_overrides = {
+        "BACKGROUND_COLOR": jnp.array(list(_NEW_BG)),
+    }
+    asset_overrides = {
+        "background": {
+            "name": "background",
+            "type": "background",
+            "data": _solid_seaquest_background(_NEW_BG),
+        }
+    }
+
+
+class GrayscaleMod(JaxAtariInternalModPlugin):
+    """Marker: SeaquestEnvMod.render converts the RGB frame to grayscale."""
+
+    name = "grayscale"
+
+
+class InvertedColorsMod(JaxAtariInternalModPlugin):
+    """Marker: SeaquestEnvMod.render inverts RGB (255 - c) after base render."""
+
+    name = "inverted_colors"
+
 
 class UnlimitedOxygenMod(JaxAtariPostStepModPlugin):
     @partial(jax.jit, static_argnums=(0,))

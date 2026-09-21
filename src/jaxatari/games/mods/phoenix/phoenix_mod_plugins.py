@@ -1,40 +1,37 @@
+from functools import partial
+import jax
 from jaxatari.modification import JaxAtariInternalModPlugin, JaxAtariPostStepModPlugin
 import jax.numpy as jnp
 from jaxatari.games.jax_phoenix import PhoenixState
 
 
 def _reshuffled_formation_x() -> jnp.ndarray:
-    """Horizontally mirror Phoenix formation X slots (unused slots stay -1)."""
-    orig = jnp.array(
+    """Scatter live slots across the playfield X (unused stay -1)."""
+    # Deterministic chaos — same live/unused mask as stock formations.
+    return jnp.array(
         [
-            [66, 90, 53, 104, 53, 104, 66, 90],
-            [61, 75, 54, 82, 47, 89, 40, 96],
-            [122, 129, 143, 127, 54, 49, 45, -1],
-            [71, 97, 49, 105, 55, 105, 59, -1],
-            [72, -1, -1, -1, -1, -1, -1, -1],
+            [18, 142, 48, 112, 72, 96, 32, 128],
+            [24, 136, 56, 104, 80, 40, 120, 64],
+            [12, 148, 88, 36, 124, 68, 100, -1],
+            [28, 132, 60, 116, 44, 92, 76, -1],
+            [80, -1, -1, -1, -1, -1, -1, -1],
         ],
         dtype=jnp.float32,
     )
-    enemy_w = jnp.float32(6.0)
-    screen_w = jnp.float32(160.0)
-    mirrored = jnp.where(orig < 0, orig, screen_w - enemy_w - orig)
-    # Reverse slot order so pairings / dive lanes also reshape.
-    return mirrored[:, ::-1]
 
 
 def _reshuffled_formation_y() -> jnp.ndarray:
-    """Reverse slot Y order within each formation (layout change, same altitudes)."""
-    orig = jnp.array(
+    """Scatter live slots across playfield Y (230 = inactive)."""
+    return jnp.array(
         [
-            [33, 33, 51, 51, 69, 69, 87, 87],
-            [32, 32, 50, 50, 68, 68, 86, 86],
-            [32, 52, 63, 89, 106, 125, 143, 230],
-            [29, 47, 64, 82, 100, 119, 136, 230],
-            [76, 230, 230, 230, 230, 230, 230, 230],
+            [40, 130, 70, 110, 55, 145, 90, 120],
+            [48, 138, 78, 118, 62, 150, 98, 35],
+            [42, 125, 85, 155, 58, 105, 140, 230],
+            [50, 135, 75, 115, 95, 160, 38, 230],
+            [100, 230, 230, 230, 230, 230, 230, 230],
         ],
         dtype=jnp.float32,
     )
-    return orig[:, ::-1]
 
 
 class BossLateMissilesMod(JaxAtariInternalModPlugin):
@@ -173,10 +170,100 @@ class BloodMoonMod(JaxAtariInternalModPlugin):
 
 
 class FormationReshuffleMod(JaxAtariInternalModPlugin):
-    """Bucket B layout probe: same enemies, mirrored/reordered formation slots."""
+    """Bucket B: scatter formation slots all over the playfield (X and Y)."""
 
     name = "formation_reshuffle"
     constants_overrides = {
         "ENEMY_POSITIONS_X": _reshuffled_formation_x(),
         "ENEMY_POSITIONS_Y": _reshuffled_formation_y(),
     }
+
+
+class PlayerDriftMod(JaxAtariPostStepModPlugin):
+    """D_p: slow rightward player drift every 4 frames."""
+
+    name = "player_drift"
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state: PhoenixState, new_state: PhoenixState) -> PhoenixState:
+        del prev_state
+        drift = jnp.where(new_state.step_counter % 4 == 0, 1, 0)
+        # Match FastPlayerMod right bound usage in game (~width-ish)
+        new_x = jnp.minimum(new_state.player_x + drift, jnp.int32(155))
+        return new_state.replace(player_x=new_x.astype(jnp.int32))
+
+
+class StaticScoreBaitMod(JaxAtariPostStepModPlugin):
+    """A: one static non-shooting enemy; teleports to a new XY after each hit."""
+
+    name = "static_score_bait"
+    BAIT_X = 77
+    BAIT_Y = 90
+
+    @partial(jax.jit, static_argnums=(0,))
+    def after_reset(self, obs, state: PhoenixState):
+        ex = jnp.full_like(state.enemies_x, -1.0)
+        ey = jnp.full_like(state.enemies_y, 230.0)
+        ex = ex.at[0].set(jnp.float32(self.BAIT_X))
+        ey = ey.at[0].set(jnp.float32(self.BAIT_Y))
+        dying = jnp.zeros_like(state.phoenix_dying)
+        timers = jnp.zeros_like(state.phoenix_death_timer)
+        state = state.replace(
+            enemies_x=ex,
+            enemies_y=ey,
+            phoenix_dying=dying,
+            phoenix_death_timer=timers,
+            enemy_projectile_x=jnp.full_like(state.enemy_projectile_x, -1),
+            enemy_projectile_y=jnp.full_like(state.enemy_projectile_y, -1),
+        )
+        return self._env._get_observation(state), state
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state: PhoenixState, new_state: PhoenixState) -> PhoenixState:
+        # Clear other enemies / projectiles; keep only bait slot 0.
+        ex = jnp.full_like(new_state.enemies_x, -1.0)
+        ey = jnp.full_like(new_state.enemies_y, 230.0)
+        dying = jnp.zeros_like(new_state.phoenix_dying)
+        timers = jnp.zeros_like(new_state.phoenix_death_timer)
+
+        prev_alive = (
+            (prev_state.enemies_x[0] > -1)
+            & (prev_state.enemies_y[0] < 200)
+            & (~prev_state.phoenix_dying[0])
+        )
+        now_dying = new_state.phoenix_dying[0] | (
+            (new_state.enemies_x[0] <= -1) | (new_state.enemies_y[0] >= 200)
+        )
+        just_hit = prev_alive & now_dying
+
+        # Sample a new bait location from step_counter (no RNG field on PhoenixState).
+        rng = jax.random.PRNGKey(new_state.step_counter.astype(jnp.uint32))
+        rng, kx, ky = jax.random.split(rng, 3)
+        rand_x = jax.random.randint(kx, (), 20, 140).astype(jnp.float32)
+        rand_y = jax.random.randint(ky, (), 40, 150).astype(jnp.float32)
+
+        cur_x = jnp.where(
+            just_hit,
+            rand_x,
+            jnp.where(prev_alive, prev_state.enemies_x[0], jnp.float32(self.BAIT_X)),
+        )
+        cur_y = jnp.where(
+            just_hit,
+            rand_y,
+            jnp.where(prev_alive, prev_state.enemies_y[0], jnp.float32(self.BAIT_Y)),
+        )
+        # If somehow missing, ensure a bait exists.
+        missing = (new_state.enemies_x[0] <= -1) & (~prev_alive)
+        cur_x = jnp.where(missing, rand_x, cur_x)
+        cur_y = jnp.where(missing, rand_y, cur_y)
+
+        ex = ex.at[0].set(cur_x)
+        ey = ey.at[0].set(cur_y)
+        return new_state.replace(
+            enemies_x=ex,
+            enemies_y=ey,
+            phoenix_dying=dying,
+            phoenix_death_timer=timers,
+            enemy_projectile_x=jnp.full_like(new_state.enemy_projectile_x, -1),
+            enemy_projectile_y=jnp.full_like(new_state.enemy_projectile_y, -1),
+        )

@@ -90,8 +90,8 @@ class LinearMovementMod(JaxAtariInternalModPlugin):
         up = jnp.logical_or(action == Action.RIGHT, action == Action.RIGHTFIRE)
         down = jnp.logical_or(action == Action.LEFT, action == Action.LEFTFIRE)
 
-        # Direct movement: move 2 pixels per frame when input pressed
-        move_amount = jnp.array(2.0, dtype=jnp.float32)
+        # Direct movement: snappy paddle (~base analog peak)
+        move_amount = jnp.array(5.0, dtype=jnp.float32)
 
         new_player_y = state.player_y
         new_player_y = jax.lax.cond(
@@ -121,8 +121,10 @@ class LinearMovementMod(JaxAtariInternalModPlugin):
         )
 
 class ShiftPlayerMod(JaxAtariInternalModPlugin):
+    """S: pull player paddle well into the middle; enemy stays at default X."""
+
     constants_overrides = {
-        "PLAYER_X": 136,
+        "PLAYER_X": 100,  # default 140 → clearly inward
     }
 
 class ShiftEnemyMod(JaxAtariInternalModPlugin):

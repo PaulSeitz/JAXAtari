@@ -1,6 +1,9 @@
 import os
 from jaxatari.modification import JaxAtariModController
-from jaxatari.games.mods.asteroids.asteroids_mod_plugins import DontShootMod, MatrixMod, SlowAsteroidsMod, InstantTurnMod
+from jaxatari.games.mods.asteroids.asteroids_mod_plugins import (
+    DontShootMod, MatrixMod, SlowAsteroidsMod, InstantTurnMod,
+    XDominantRocksMod, NoMomentumMod, FasterAsteroidsMod, FrozenAsteroidsMod,
+)
 
 class AsteroidsEnvMod(JaxAtariModController):
     """
@@ -12,6 +15,10 @@ class AsteroidsEnvMod(JaxAtariModController):
         "matrix_theme": MatrixMod,
         "slow_asteroids": SlowAsteroidsMod,
         "instant_turn": InstantTurnMod,
+        "x_dominant_rocks": XDominantRocksMod,
+        "no_momentum": NoMomentumMod,
+        "faster_asteroids": FasterAsteroidsMod,
+        "frozen_asteroids": FrozenAsteroidsMod,
     }
 
     _mod_sprite_dir = os.path.join(os.path.dirname(__file__), "asteroids", "sprites")

@@ -1040,7 +1040,7 @@ class DynamicLaneDriftMod(JaxAtariPostStepModPlugin):
     stays coherent for ego.
     """
 
-    conflicts_with = ["vertical_oscillation", "continuous_random_spawns"]
+    conflicts_with = ["vertical_oscillation", "continuous_random_spawns", "random_spawns"]
 
     AMPLITUDE = 10.0
     FREQ = 0.035  # ~180 frames per cycle
@@ -1091,22 +1091,28 @@ class DynamicLaneDriftMod(JaxAtariPostStepModPlugin):
 
 
 class ContinuousRandomSpawnsMod(JaxAtariPostStepModPlugin):
-    """Bucket B: enemies keep a continuous random Y instead of the 4-lane grid.
+    """Bucket B: rip the lane grid — random Y on spawn for sharks, subs, divers.
 
-    On spawn (slot inactive→active), sample Y in the playable band. While the
-    slot stays active, that Y is held across frames (base movement would other-
-    wise snap back to ``SPAWN_POSITIONS_Y``).
+    Spawn still goes through Seaquest's lane slots (engine requirement), but
+    immediately after inactive→active we sample Y within the stock lane Y-band and hold
+    it for the slot's lifetime (base step would otherwise snap back to
+    ``SPAWN_POSITIONS_Y``). Effectively: no lanes for anyone.
     """
 
-    conflicts_with = ["dynamic_lane_drift", "shift_lanes", "vertical_oscillation"]
-
-    Y_MIN = 50
-    Y_MAX = 140
+    conflicts_with = [
+        "dynamic_lane_drift",
+        "shift_lanes",
+        "vertical_oscillation",
+        "lane_scramble",
+    ]
 
     @partial(jax.jit, static_argnums=(0,))
     def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
-        y_min = jnp.int32(self.Y_MIN)
-        y_max = jnp.int32(self.Y_MAX)
+        # Clamp to stock lane band so nothing spawns above the top lane
+        # (near-surface hunting → unintended surfacing deaths).
+        lanes = self._env.consts.SPAWN_POSITIONS_Y.astype(jnp.int32)
+        y_min = lanes[0]   # highest / topmost lane
+        y_max = lanes[-1]  # deepest lane
         rng = new_state.rng_key
 
         def _reassign(prev_pos, new_pos, slot_rng):
@@ -1124,8 +1130,12 @@ class ContinuousRandomSpawnsMod(JaxAtariPostStepModPlugin):
 
         n_shark = new_state.shark_positions.shape[0]
         n_sub = new_state.sub_positions.shape[0]
-        keys = jax.random.split(rng, n_shark + n_sub + 1)
-        shark_keys, sub_keys, new_rng = keys[:n_shark], keys[n_shark:n_shark + n_sub], keys[-1]
+        n_diver = new_state.diver_positions.shape[0]
+        keys = jax.random.split(rng, n_shark + n_sub + n_diver + 1)
+        shark_keys = keys[:n_shark]
+        sub_keys = keys[n_shark : n_shark + n_sub]
+        diver_keys = keys[n_shark + n_sub : n_shark + n_sub + n_diver]
+        new_rng = keys[-1]
 
         new_sharks = jax.vmap(_reassign)(
             prev_state.shark_positions, new_state.shark_positions, shark_keys
@@ -1133,9 +1143,13 @@ class ContinuousRandomSpawnsMod(JaxAtariPostStepModPlugin):
         new_subs = jax.vmap(_reassign)(
             prev_state.sub_positions, new_state.sub_positions, sub_keys
         )
+        new_divers = jax.vmap(_reassign)(
+            prev_state.diver_positions, new_state.diver_positions, diver_keys
+        )
         return new_state.replace(
             shark_positions=new_sharks,
             sub_positions=new_subs,
+            diver_positions=new_divers,
             rng_key=new_rng,
         )
 
@@ -1212,6 +1226,7 @@ class MicroSwarmMod(JaxAtariPostStepModPlugin):
 
     @partial(jax.jit, static_argnums=(0,))
     def after_reset(self, obs, state: SeaquestState):
+        # Shorten once; do NOT clamp every frame (that freezes timers at 40 forever).
         timers = jnp.maximum(state.spawn_state.spawn_timers // 3, jnp.int32(40))
         spawn = state.spawn_state.replace(spawn_timers=timers)
         return obs, state.replace(spawn_state=spawn)
@@ -1219,8 +1234,6 @@ class MicroSwarmMod(JaxAtariPostStepModPlugin):
     @partial(jax.jit, static_argnums=(0,))
     def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
         del prev_state
-        timers = jnp.maximum(new_state.spawn_state.spawn_timers // 3, jnp.int32(40))
-        spawn = new_state.spawn_state.replace(spawn_timers=timers)
 
         def _swarm_fill(positions):
             # (12, 3) → (4, 3, 3)
@@ -1248,7 +1261,6 @@ class MicroSwarmMod(JaxAtariPostStepModPlugin):
             return jax.vmap(_fill_lane)(lanes).reshape(positions.shape)
 
         return new_state.replace(
-            spawn_state=spawn,
             shark_positions=_swarm_fill(new_state.shark_positions),
             sub_positions=_swarm_fill(new_state.sub_positions),
         )
@@ -1417,6 +1429,7 @@ class LaneScrambleMod(JaxAtariPostStepModPlugin):
     conflicts_with = [
         "dynamic_lane_drift",
         "continuous_random_spawns",
+        "random_spawns",
         "shift_lanes",
         "vertical_oscillation",
     ]

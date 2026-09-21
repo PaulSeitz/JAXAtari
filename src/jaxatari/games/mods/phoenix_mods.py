@@ -12,6 +12,8 @@ from jaxatari.games.mods.phoenix.phoenix_mod_plugins import (
     MatrixMod,
     BloodMoonMod,
     FormationReshuffleMod,
+    PlayerDriftMod,
+    StaticScoreBaitMod,
 )
 
 
@@ -33,6 +35,8 @@ class PhoenixEnvMod(JaxAtariModController):
         "matrix_theme": MatrixMod,
         "blood_moon": BloodMoonMod,
         "formation_reshuffle": FormationReshuffleMod,
+        "player_drift": PlayerDriftMod,
+        "static_score_bait": StaticScoreBaitMod,
     }
 
     def __init__(

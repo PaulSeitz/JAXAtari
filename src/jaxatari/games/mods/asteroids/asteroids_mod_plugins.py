@@ -343,3 +343,94 @@ class InstantTurnMod(JaxAtariInternalModPlugin):
             lambda: (state_player_x, state_player_y, state_player_speed_x, state_player_speed_y,
                      state_player_rotation, state_respawn_timer, rng_key)
         )
+
+
+class XDominantRocksMod(JaxAtariPostStepModPlugin):
+    """S: asteroids primarily travel horizontally (undo Y motion each step)."""
+
+    name = "x_dominant_rocks"
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state: AsteroidsState, new_state: AsteroidsState) -> AsteroidsState:
+        # Restore Y from previous frame for active rocks; keep new X.
+        prev_y = prev_state.asteroid_states[:, 1]
+        sizes = new_state.asteroid_states[:, 3]
+        active = sizes != self._env.consts.INACTIVE
+        merged = new_state.asteroid_states.at[:, 1].set(
+            jnp.where(active, prev_y, new_state.asteroid_states[:, 1])
+        )
+        # Force side-step often so X motion dominates.
+        return new_state.replace(
+            asteroid_states=merged,
+            side_step_counter=jnp.minimum(new_state.side_step_counter, jnp.int32(1)),
+        )
+
+
+class NoMomentumMod(JaxAtariPostStepModPlugin):
+    """D_p: zero residual ship velocity (no coasting)."""
+
+    name = "no_momentum"
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state: AsteroidsState, new_state: AsteroidsState) -> AsteroidsState:
+        del prev_state
+        return new_state.replace(
+            player_speed_x=jnp.zeros_like(new_state.player_speed_x),
+            player_speed_y=jnp.zeros_like(new_state.player_speed_y),
+        )
+
+
+class FasterAsteroidsMod(JaxAtariInternalModPlugin):
+    """D_t: faster asteroid translation."""
+
+    name = "faster_asteroids"
+    constants_overrides = {
+        "ASTEROID_SPEED": (4, 2),
+    }
+
+
+class FrozenAsteroidsMod(JaxAtariPostStepModPlugin):
+    """A: asteroids do not move (still shootable); teleport after hits away from player."""
+
+    name = "frozen_asteroids"
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state: AsteroidsState, new_state: AsteroidsState) -> AsteroidsState:
+        inactive = self._env.consts.INACTIVE
+        prev_ast = prev_state.asteroid_states
+        new_ast = new_state.asteroid_states
+        # Freeze X/Y for rocks that stayed active; keep new size/color so hits stick.
+        was_active = prev_ast[:, 3] != inactive
+        now_active = new_ast[:, 3] != inactive
+        still = was_active & now_active
+        frozen = new_ast.at[:, 0].set(jnp.where(still, prev_ast[:, 0], new_ast[:, 0]))
+        frozen = frozen.at[:, 1].set(jnp.where(still, prev_ast[:, 1], new_ast[:, 1]))
+
+        # Newly active (spawn / split): teleport away from player.
+        just_spawned = (~was_active) & now_active
+        px = self._env.to_screen_pos(new_state.player_x).astype(jnp.float32)
+        py = self._env.to_screen_pos(new_state.player_y).astype(jnp.float32)
+        rng = new_state.rng_key
+        n = frozen.shape[0]
+        keys = jax.random.split(rng, n + 1)
+        slot_keys, new_rng = keys[:-1], keys[-1]
+
+        def _tele(i, row, key):
+            kx, ky = jax.random.split(key)
+            rx = jax.random.randint(kx, (), 16, 144).astype(row.dtype)
+            ry = jax.random.randint(ky, (), 16, 180).astype(row.dtype)
+            # Reject samples too close to player — push to opposite quadrant.
+            too_close = (jnp.abs(rx.astype(jnp.float32) - px) < 28) & (
+                jnp.abs(ry.astype(jnp.float32) - py) < 28
+            )
+            rx2 = jnp.where(too_close, jnp.where(px < 80, jnp.int32(130), jnp.int32(30)).astype(row.dtype), rx)
+            ry2 = jnp.where(too_close, jnp.where(py < 100, jnp.int32(160), jnp.int32(40)).astype(row.dtype), ry)
+            row2 = row.at[0].set(rx2).at[1].set(ry2)
+            return jnp.where(just_spawned[i], row2, row)
+
+        frozen = jax.vmap(_tele)(jnp.arange(n), frozen, slot_keys)
+        return new_state.replace(
+            asteroid_states=frozen,
+            side_step_counter=prev_state.side_step_counter,
+            rng_key=new_rng,
+        )

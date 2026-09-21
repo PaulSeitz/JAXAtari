@@ -103,6 +103,7 @@ class SeaquestEnvMod(JaxAtariModController):
         # Extra layout / kinematics / object-set probes
         "dynamic_lane_drift": DynamicLaneDriftMod,
         "continuous_random_spawns": ContinuousRandomSpawnsMod,
+        "random_spawns": ContinuousRandomSpawnsMod,  # alias — paper showcase name
         "ocean_currents": OceanCurrentsMod,
         "erratic_enemies": ErraticEnemiesMod,
         "micro_swarm": MicroSwarmMod,

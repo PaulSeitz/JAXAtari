@@ -3,7 +3,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from jaxatari.modification import JaxAtariInternalModPlugin
+from jaxatari.modification import JaxAtariInternalModPlugin, JaxAtariPostStepModPlugin
 from jaxatari.games.jax_beamrider import (
     BLUE_LINE_INIT_TABLE,
     LaneBlockerState,
@@ -3621,3 +3621,115 @@ class TeleportUFOsMod(JaxAtariInternalModPlugin):
             pattern_timer,
             new_key,
         )
+
+
+
+class SlowStrafeMod(JaxAtariInternalModPlugin):
+    """D_p: slower player lane strafe."""
+
+    name = "slow_strafe"
+    constants_overrides = {
+        "PLAYER_SPEED": 1.0,
+    }
+
+
+class TopIdleNoShootMod(JaxAtariPostStepModPlugin):
+    """A: one idle UFO at laser range on a random *playable* lane; no shots.
+
+    Registry key ``idle_at_range`` (alias ``top_idle_no_shoot``).
+    Lanes 0 and 6 (far L/R) are unreachable — only inner lanes 1–5.
+
+    Lane id is stored in ``white_ufo_pattern_timer[0]``. The base game rewrites
+    that field every step, so we always read the lane from *prev_state* (our
+    last post-step write), never from ``new_state``.
+    """
+
+    name = "idle_at_range"
+
+    def _place(self, lane, dtype=jnp.float32):
+        env = self._env
+        off = jnp.array(env.consts.ENEMY_OFFSCREEN_POS, dtype=dtype)
+        shootable_y = jnp.float32(env.consts.MAX_LASER_Y) + jnp.float32(8.0)
+        top_clip = jnp.float32(env.consts.TOP_CLIP)
+        x = env.top_lanes_x[lane] + env.lane_dx_over_dy[lane] * (shootable_y - top_clip)
+        slot0 = jnp.array([x, shootable_y], dtype=dtype)
+        return jnp.stack([slot0, off, off], axis=1), shootable_y
+
+    @partial(jax.jit, static_argnums=(0,))
+    def after_reset(self, obs, state):
+        env = self._env
+        playable = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+        keys = state.level.white_ufo_rngs
+        k0, k_lane = jax.random.split(keys[0])
+        lane = playable[jax.random.randint(k_lane, (), 0, playable.shape[0])]
+        new_pos, _ = self._place(lane)
+        bullet_off = jnp.array(env.consts.BULLET_OFFSCREEN_POS, dtype=jnp.float32)
+        n_shots = state.level.enemy_shot_pos.shape[1]
+        level = state.level.replace(
+            white_ufo_pos=new_pos,
+            white_ufo_vel=jnp.zeros_like(state.level.white_ufo_vel),
+            white_ufo_attack_time=jnp.zeros_like(state.level.white_ufo_attack_time),
+            white_ufo_pattern_id=jnp.zeros_like(state.level.white_ufo_pattern_id),
+            white_ufo_pattern_timer=state.level.white_ufo_pattern_timer.at[0].set(
+                lane.astype(state.level.white_ufo_pattern_timer.dtype)
+            ),
+            white_ufo_time_on_lane=state.level.white_ufo_time_on_lane.at[0].set(0),
+            white_ufo_rngs=keys.at[0].set(k0),
+            white_ufo_left=jnp.int32(15),
+            enemy_shot_timer=jnp.zeros((n_shots,), dtype=state.level.enemy_shot_timer.dtype),
+            enemy_shot_pos=jnp.tile(bullet_off.reshape(2, 1), (1, n_shots)),
+            enemy_shot_explosion_frame=jnp.zeros(
+                (n_shots,), dtype=state.level.enemy_shot_explosion_frame.dtype
+            ),
+            enemy_shot_explosion_pos=jnp.tile(bullet_off.reshape(2, 1), (1, n_shots)),
+        )
+        return obs, state.replace(level=level)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state, new_state):
+        level = new_state.level
+        env = self._env
+        bullet_off = jnp.array(env.consts.BULLET_OFFSCREEN_POS, dtype=jnp.float32)
+        playable = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+
+        # Lane from *our* last write — game clobbers pattern_timer during step.
+        stored = prev_state.level.white_ufo_pattern_timer[0].astype(jnp.int32)
+        valid_stored = jnp.any(playable == stored)
+        killed = level.white_ufo_left < prev_state.level.white_ufo_left
+        need_new = killed | (~valid_stored)
+
+        keys = level.white_ufo_rngs
+        k0, k_lane = jax.random.split(keys[0])
+        new_lane = playable[jax.random.randint(k_lane, (), 0, playable.shape[0])]
+        lane = jnp.where(need_new, new_lane, stored)
+
+        new_pos, _ = self._place(lane)
+        n_shots = level.enemy_shot_pos.shape[1]
+        hold = prev_state.level.white_ufo_time_on_lane[0]
+        new_hold = jnp.where(need_new, jnp.int32(0), hold + 1)
+
+        level = level.replace(
+            white_ufo_pos=new_pos,
+            white_ufo_vel=jnp.zeros_like(level.white_ufo_vel),
+            white_ufo_attack_time=jnp.zeros_like(level.white_ufo_attack_time),
+            white_ufo_pattern_id=jnp.zeros_like(level.white_ufo_pattern_id),
+            white_ufo_pattern_timer=level.white_ufo_pattern_timer.at[0].set(
+                lane.astype(level.white_ufo_pattern_timer.dtype)
+            ),
+            white_ufo_time_on_lane=level.white_ufo_time_on_lane.at[0].set(new_hold),
+            white_ufo_rngs=keys.at[0].set(k0),
+            # Keep a stable remaining count so the game does not churn spawns;
+            # only drop on a real kill.
+            white_ufo_left=jnp.where(
+                killed,
+                jnp.maximum(level.white_ufo_left, jnp.int32(1)),
+                jnp.int32(15),
+            ),
+            enemy_shot_timer=jnp.zeros((n_shots,), dtype=level.enemy_shot_timer.dtype),
+            enemy_shot_pos=jnp.tile(bullet_off.reshape(2, 1), (1, n_shots)),
+            enemy_shot_explosion_frame=jnp.zeros(
+                (n_shots,), dtype=level.enemy_shot_explosion_frame.dtype
+            ),
+            enemy_shot_explosion_pos=jnp.tile(bullet_off.reshape(2, 1), (1, n_shots)),
+        )
+        return new_state.replace(level=level)

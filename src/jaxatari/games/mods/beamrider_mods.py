@@ -8,6 +8,8 @@ from jaxatari.games.mods.beamrider.beamrider_mod_plugins import (
     TeleportUFOsMod,
     ThreeLanesMod,
     ToasterMod,
+    SlowStrafeMod,
+    TopIdleNoShootMod,
 )
 
 
@@ -25,6 +27,9 @@ class BeamRiderEnvMod(JaxAtariModController):
         "teleport_ufos": TeleportUFOsMod,
         "three_lanes": ThreeLanesMod,
         "toaster": ToasterMod,
+        "slow_strafe": SlowStrafeMod,
+        "idle_at_range": TopIdleNoShootMod,
+        "top_idle_no_shoot": TopIdleNoShootMod,  # alias
     }
 
     def __init__(

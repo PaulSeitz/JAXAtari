@@ -117,21 +117,22 @@ class FireBallsMod(JaxAtariInternalModPlugin):
     }
 
 
-def _solid_seaquest_background(rgb: tuple[int, int, int]) -> "np.ndarray":
-    """Full-frame solid background (Seaquest playfield is 210×160)."""
+def _rgba_swatch(rgb: tuple[int, int, int]):
+    """1×1 procedural RGBA pixel so `rgb` is present in the renderer palette."""
     import numpy as np
 
-    h, w = 210, 160
-    out = np.empty((h, w, 4), dtype=np.uint8)
-    out[..., 0] = rgb[0]
-    out[..., 1] = rgb[1]
-    out[..., 2] = rgb[2]
-    out[..., 3] = 255
-    return out
+    return np.array([[[rgb[0], rgb[1], rgb[2], 255]]], dtype=np.uint8)
 
 
 class ChangeBackgroundColorMod(JaxAtariInternalModPlugin):
-    """Replace the ocean background with a solid magenta playfield (visual-only)."""
+    """Magenta playfield OOD (visual-only).
+
+    Do **not** replace the packed background asset: that drops the water blues /
+    black from ``COLOR_TO_ID`` and makes ``_bake_surface_wave_backgrounds``
+    KeyError when it falls back to ``bg/2.npy``. Instead we only seed the new
+    color into the palette; ``SeaquestEnvMod`` remaps ``BACKGROUND_FRAMES``
+    after a normal bake (left black pillar kept).
+    """
 
     _NEW_BG = (180, 0, 180)
 
@@ -139,10 +140,10 @@ class ChangeBackgroundColorMod(JaxAtariInternalModPlugin):
         "BACKGROUND_COLOR": jnp.array(list(_NEW_BG)),
     }
     asset_overrides = {
-        "background": {
-            "name": "background",
-            "type": "background",
-            "data": _solid_seaquest_background(_NEW_BG),
+        "change_bg_swatch": {
+            "name": "change_bg_swatch",
+            "type": "procedural",
+            "data": _rgba_swatch(_NEW_BG),
         }
     }
 

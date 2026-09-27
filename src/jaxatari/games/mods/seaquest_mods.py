@@ -125,12 +125,42 @@ class SeaquestEnvMod(JaxAtariModController):
         self._has_mirror_world = "mirror_world" in mods_config
         self._has_grayscale = "grayscale" in mods_config
         self._has_inverted_colors = "inverted_colors" in mods_config
+        self._has_change_background = "change_background_color" in mods_config
         super().__init__(
             env=env,
             mods_config=mods_config,
             allow_conflicts=allow_conflicts,
             registry=self.REGISTRY
         )
+        if self._has_change_background:
+            self._apply_change_background_color()
+
+    def _apply_change_background_color(self):
+        """Remap baked background IDs to magenta; preserve the left black pillar.
+
+        Runs after renderer init so surface-wave baking still sees the original
+        water blues in ``COLOR_TO_ID`` (see ``ChangeBackgroundColorMod``).
+        """
+        import numpy as np
+
+        renderer = self._env.renderer
+        new_rgb = tuple(ChangeBackgroundColorMod._NEW_BG)
+        if new_rgb not in renderer.COLOR_TO_ID:
+            raise KeyError(
+                f"change_background_color: palette missing swatch {new_rgb}; "
+                "ChangeBackgroundColorMod.asset_overrides must seed it."
+            )
+        new_id = int(renderer.COLOR_TO_ID[new_rgb])
+        black_id = renderer.COLOR_TO_ID.get((0, 0, 0))
+        frames = np.asarray(renderer.BACKGROUND_FRAMES)
+        if black_id is None:
+            frames = np.full_like(frames, new_id)
+        else:
+            frames = np.where(frames != int(black_id), new_id, frames)
+        renderer.BACKGROUND_FRAMES = jnp.asarray(frames)
+        renderer.BACKGROUND = renderer.BACKGROUND_FRAMES[0]
+        alt_i = 1 if renderer.BACKGROUND_FRAMES.shape[0] > 1 else 0
+        renderer.BACKGROUND_ALT = renderer.BACKGROUND_FRAMES[alt_i]
 
     @partial(jax.jit, static_argnames=['self'])
     def render(self, state):

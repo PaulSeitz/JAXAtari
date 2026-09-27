@@ -3191,4 +3191,4 @@ class SeaquestRenderer(JAXGameRenderer):
             color_id=self.BACKGROUND[0, 0]
         )
 
-        return self.jr.render_from_palette(raster, self.PALETTE)s
+        return self.jr.render_from_palette(raster, self.PALETTE)

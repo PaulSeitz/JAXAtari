@@ -1852,8 +1852,10 @@ class LaneScrambleMod(JaxAtariInternalModPlugin):
     Applied *inside* ``spawn_step`` / diver movement so collision uses the
     remapped Y (a post-step-only remap left hitboxes on the stock lanes).
 
-    Epoch changes that would land a lethal entity on the player keep that
-    entity's previous Y until the remapped slot is clear.
+    On-screen (hittable) entities keep their previous displayed Y across epoch
+    changes — a reject-vs-player check is not enough because ``spawn_step`` only
+    sees the pre-move player pose while collision uses the post-move pose, so
+    reshuffles could still teleport lethal sprites onto the player.
     """
 
     conflicts_with = [
@@ -1865,6 +1867,8 @@ class LaneScrambleMod(JaxAtariInternalModPlugin):
     ]
 
     PERIOD = 90
+    # Bigger than shark bob (±4) / single-frame drift; smaller than a lane gap (~24).
+    TELEPORT_Y_THRESH = 12
     PERMS = (
         (0, 1, 2, 3),
         (1, 0, 3, 2),
@@ -1904,6 +1908,7 @@ class LaneScrambleMod(JaxAtariInternalModPlugin):
         base_ys = self._env.consts.SPAWN_POSITIONS_Y.astype(jnp.int32)
         perms = jnp.array(self.PERMS, dtype=jnp.int32)
         perm = perms[(state.step_counter // self.PERIOD) % perms.shape[0]]
+        y_thresh = jnp.int32(self.TELEPORT_Y_THRESH)
 
         def _scramble_enemies(positions):
             lanes = positions.reshape(4, 3, 3)
@@ -1927,28 +1932,22 @@ class LaneScrambleMod(JaxAtariInternalModPlugin):
 
             return jax.vmap(_one)(jnp.arange(4), positions)
 
-        new_sharks = _scramble_enemies(new_sharks)
-        new_subs = _scramble_enemies(new_subs)
-        new_divers = _scramble_divers(new_divers)
+        def _hold_onscreen(scrambled, prev_pos):
+            """Keep prior Y when a hittable entity would Y-teleport this frame."""
 
-        player_xy = jnp.array([state.player_x, state.player_y])
-        player_size = self._env.consts.PLAYER_SIZE
-
-        def _reject(scrambled, prev_pos, enemy_size):
             def _one(scr, prev):
-                active = scr[2] != 0
-                overlaps = jnp.logical_and(
-                    active,
-                    self._env.check_collision_single(
-                        player_xy, player_size, scr[:2], enemy_size
-                    ),
-                )
-                return jnp.where(overlaps, scr.at[1].set(prev[1]), scr)
+                active = jnp.logical_and(scr[2] != 0, prev[2] != 0)
+                # Gate on the pre-move pose: that is the sprite the player saw.
+                onscreen = self._env.enemy_is_hittable(prev)
+                jumped = jnp.abs(scr[1] - prev[1]) >= y_thresh
+                hold = jnp.logical_and(jnp.logical_and(active, onscreen), jumped)
+                return jnp.where(hold, scr.at[1].set(prev[1]), scr)
 
             return jax.vmap(_one)(scrambled, prev_pos)
 
-        new_sharks = _reject(new_sharks, shark_positions, self._env.consts.SHARK_SIZE)
-        new_subs = _reject(new_subs, sub_positions, self._env.consts.ENEMY_SUB_SIZE)
+        new_sharks = _hold_onscreen(_scramble_enemies(new_sharks), shark_positions)
+        new_subs = _hold_onscreen(_scramble_enemies(new_subs), sub_positions)
+        new_divers = _hold_onscreen(_scramble_divers(new_divers), diver_positions)
         return new_spawn_state, new_sharks, new_subs, new_divers, new_key
 
     @partial(jax.jit, static_argnums=(0,))
@@ -1983,13 +1982,19 @@ class LaneScrambleMod(JaxAtariInternalModPlugin):
         base_ys = self._env.consts.SPAWN_POSITIONS_Y.astype(jnp.int32)
         perms = jnp.array(self.PERMS, dtype=jnp.int32)
         perm = perms[(step_counter // self.PERIOD) % perms.shape[0]]
+        y_thresh = jnp.int32(self.TELEPORT_Y_THRESH)
 
-        def _one(lane_i, pos):
+        def _one(lane_i, pos, prev):
             active = pos[2] != 0
             delta = base_ys[perm[lane_i]] - base_ys[lane_i]
-            return jnp.where(active, pos.at[1].set(pos[1] + delta), pos)
+            scrambled = jnp.where(active, pos.at[1].set(pos[1] + delta), pos)
+            still = jnp.logical_and(active, prev[2] != 0)
+            onscreen = self._env.enemy_is_hittable(prev)
+            jumped = jnp.abs(scrambled[1] - prev[1]) >= y_thresh
+            hold = jnp.logical_and(jnp.logical_and(still, onscreen), jumped)
+            return jnp.where(hold, scrambled.at[1].set(prev[1]), scrambled)
 
-        final_pos = jax.vmap(_one)(jnp.arange(4), final_pos)
+        final_pos = jax.vmap(_one)(jnp.arange(4), final_pos, diver_positions)
         return final_pos, final_collected, new_spawn_state, new_rng
 
     @partial(jax.jit, static_argnums=(0,))

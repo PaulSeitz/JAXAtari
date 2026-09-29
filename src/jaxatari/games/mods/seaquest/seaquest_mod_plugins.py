@@ -7,21 +7,35 @@ from jaxatari.games.jax_seaquest import SeaquestState, SpawnState
 
 
 class DisableEnemiesMod(JaxAtariPostStepModPlugin):
-    """Disable enemies in the environment."""
-    
+    """Remove sharks/subs/missiles while keeping diver spawn cycles alive.
+
+    Diver+escort co-spawn parks lane timers at 0 until a kill-clear or
+    survive-off reloads them. With enemies zeroed every frame that reload
+    never happens, so after the opening twin drop (which spends the credit
+    bank) no further divers appear. Reload timers here and re-arm swam-off
+    lanes as if the escorts had cleared.
+    """
+
     @partial(jax.jit, static_argnums=(0,))
     def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
-        """
-        This function is called by the wrapper *after*
-        the main step is complete.
-        Access the environment via self._env (set by JaxAtariModWrapper).
-        """
-        # Zero out all enemy positions
+        del prev_state
+        spawn = new_state.spawn_state
+        reload = self._env.spawn_timer_reload(spawn.diver_array)
+        # Only refill when parked at 0 (post co-spawn). Leave mid-countdown alone.
+        timers = jnp.where(spawn.spawn_timers <= 0, reload, spawn.spawn_timers)
+        diver_array = jnp.where(spawn.diver_array == -1, jnp.int32(1), spawn.diver_array)
+        spawn = spawn.replace(
+            spawn_timers=timers,
+            diver_array=diver_array,
+            survived=jnp.zeros_like(spawn.survived),
+            to_be_spawned=jnp.zeros_like(spawn.to_be_spawned),
+        )
         return new_state.replace(
             shark_positions=jnp.zeros_like(new_state.shark_positions),
             sub_positions=jnp.zeros_like(new_state.sub_positions),
             enemy_missile_positions=jnp.zeros_like(new_state.enemy_missile_positions),
-            surface_sub_position=jnp.zeros_like(new_state.surface_sub_position)
+            surface_sub_position=jnp.zeros_like(new_state.surface_sub_position),
+            spawn_state=spawn,
         )
 
 
@@ -35,6 +49,7 @@ class NoDiversMod(JaxAtariInternalModPlugin):
     def step_diver_movement(self,
             diver_positions: chex.Array,
             shark_positions: chex.Array,
+            sub_positions: chex.Array,
             state_player_x: chex.Array,
             state_player_y: chex.Array,
             state_divers_collected: chex.Array,
@@ -49,6 +64,7 @@ class NoDiversMod(JaxAtariInternalModPlugin):
         Filling with ``-1`` left divers *active* at clipped (0, 0) — a ceiling
         COLLECT ghost. Use zeros so slots are inactive, matching DisableEnemiesMod.
         """
+        del shark_positions, sub_positions, state_player_x, state_player_y, step_counter
         return (
             jnp.zeros_like(diver_positions),
             state_divers_collected,
@@ -243,15 +259,32 @@ class FasterEnemiesMod(JaxAtariPostStepModPlugin):
 
 
 class SlowerEnemiesMod(JaxAtariPostStepModPlugin):
-    """Enemies move one fewer pixel on alternating frames (roughly half speed)."""
+    """Halve enemy horizontal speed by skipping X updates on even frames.
+
+    The old "undo 1px" implementation reversed slow enemies (diff-0 often moves
+    0–1px/frame), freezing escorts on-screen and parking spawn timers at 0 so
+    no divers appeared after the opening pair.
+    """
 
     @partial(jax.jit, static_argnums=(0,))
     def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
-        del prev_state
-        undo = jnp.where(new_state.step_counter % 2 == 0, 1, 0)
+        hold = new_state.step_counter % 2 == 0
+
+        def _hold_x(new_pos, old_pos):
+            active = new_pos[2] != 0
+            return jnp.where(
+                jnp.logical_and(active, hold),
+                new_pos.at[0].set(old_pos[0]),
+                new_pos,
+            )
+
         return new_state.replace(
-            shark_positions=_boost_enemy_x(new_state.shark_positions, -undo),
-            sub_positions=_boost_enemy_x(new_state.sub_positions, -undo),
+            shark_positions=jax.vmap(_hold_x)(
+                new_state.shark_positions, prev_state.shark_positions
+            ),
+            sub_positions=jax.vmap(_hold_x)(
+                new_state.sub_positions, prev_state.sub_positions
+            ),
         )
 
 
@@ -265,35 +298,80 @@ class ShiftLanesMod(JaxAtariInternalModPlugin):
 
 
 class OnlySubmarinesMod(JaxAtariPostStepModPlugin):
-    """Force all lanes to spawn enemy submarines instead of sharks."""
+    """Force enemy escorts to be submarines; keep diver spawn timers cycling.
 
-    @partial(jax.jit, static_argnums=(0,))
-    def after_reset(self, obs, state: SeaquestState):
-        spawn = state.spawn_state.replace(prev_sub=jnp.ones(4, dtype=jnp.int32))
-        return obs, state.replace(spawn_state=spawn)
+    Shark→sub conversion happens after the shark+diver co-spawn path so divers
+    still appear. Zeroing sharks without a timer reload used to park timers at 0
+    forever (same failure mode as ``no_enemies``).
+    """
 
     @partial(jax.jit, static_argnums=(0,))
     def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
         del prev_state
-        spawn = new_state.spawn_state.replace(prev_sub=jnp.ones(4, dtype=jnp.int32))
-        zero_sharks = jnp.zeros_like(new_state.shark_positions)
-        return new_state.replace(shark_positions=zero_sharks, spawn_state=spawn)
+        sharks = new_state.shark_positions
+        subs = new_state.sub_positions
+        # Prefer live sharks (just co-spawned) remapped into sub slots.
+        converted_subs = jnp.where(sharks[:, 2:3] != 0, sharks, subs)
+        spawn = new_state.spawn_state
+        live = jnp.any(converted_subs.reshape(4, 3, 3)[:, :, 2] != 0, axis=1)
+        reload = self._env.spawn_timer_reload(spawn.diver_array)
+        timers = jnp.where(
+            jnp.logical_and(spawn.spawn_timers <= 0, jnp.logical_not(live)),
+            reload,
+            spawn.spawn_timers,
+        )
+        spawn = spawn.replace(
+            prev_sub=jnp.where(
+                spawn.prev_sub < 0, spawn.prev_sub, jnp.ones(4, dtype=jnp.int32)
+            ),
+            spawn_timers=timers,
+            survived=jnp.zeros_like(spawn.survived),
+            to_be_spawned=jnp.zeros_like(spawn.to_be_spawned),
+        )
+        return new_state.replace(
+            shark_positions=jnp.zeros_like(sharks),
+            sub_positions=converted_subs,
+            spawn_state=spawn,
+        )
 
 
 class OnlySharksMod(JaxAtariPostStepModPlugin):
-    """Force all lanes to spawn sharks instead of enemy submarines."""
+    """Force all lanes to spawn sharks instead of enemy submarines.
+
+    Dropping sub follow-up waves without reloading timers parks the countdown
+    at 0 and stops further diver co-spawns after the opening pair.
+    """
 
     @partial(jax.jit, static_argnums=(0,))
     def after_reset(self, obs, state: SeaquestState):
-        spawn = state.spawn_state.replace(prev_sub=jnp.zeros(4, dtype=jnp.int32))
-        return obs, state.replace(spawn_state=spawn)
+        # Keep prev_sub < 0 so opening still uses FIRST_WAVE_DIVER_LANES.
+        return obs, state
 
     @partial(jax.jit, static_argnums=(0,))
     def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
         del prev_state
-        spawn = new_state.spawn_state.replace(prev_sub=jnp.zeros(4, dtype=jnp.int32))
-        zero_subs = jnp.zeros_like(new_state.sub_positions)
-        return new_state.replace(sub_positions=zero_subs, spawn_state=spawn)
+        sharks = new_state.shark_positions
+        spawn = new_state.spawn_state
+        live = jnp.any(sharks.reshape(4, 3, 3)[:, :, 2] != 0, axis=1)
+        reload = self._env.spawn_timer_reload(spawn.diver_array)
+        timers = jnp.where(
+            jnp.logical_and(spawn.spawn_timers <= 0, jnp.logical_not(live)),
+            reload,
+            spawn.spawn_timers,
+        )
+        # Force shark waves going forward without erasing the opening sentinel
+        # until the first wave has actually started (prev_sub already >= 0).
+        prev_sub = jnp.where(spawn.prev_sub < 0, spawn.prev_sub, jnp.zeros_like(spawn.prev_sub))
+        spawn = spawn.replace(
+            prev_sub=prev_sub,
+            spawn_timers=timers,
+            survived=jnp.zeros_like(spawn.survived),
+            to_be_spawned=jnp.zeros_like(spawn.to_be_spawned),
+        )
+        return new_state.replace(
+            sub_positions=jnp.zeros_like(new_state.sub_positions),
+            spawn_state=spawn,
+        )
 
 
 class VerticalOscillationMod(JaxAtariPostStepModPlugin):
@@ -315,20 +393,25 @@ class VerticalOscillationMod(JaxAtariPostStepModPlugin):
 
 
 class DenseSpawnsMod(JaxAtariPostStepModPlugin):
-    """Halve spawn timers so enemies appear more frequently."""
+    """Shorten spawn cadence so enemies/divers appear more frequently.
+
+    Must not clamp timers every frame: co-spawn fires at
+    ``DIVER_SPAWN_TIMER_TRIGGER`` (128), so a floor of 80 freezes the countdown
+    forever and starves all later waves (same class of bug as no_enemies).
+    """
+
+    constants_overrides = {
+        "SPAWN_TIMER_RELOAD": jnp.array(4, dtype=jnp.int32),
+        "SPAWN_TIMER_RELOAD_AFTER_SURVIVE": jnp.array(48, dtype=jnp.int32),
+    }
 
     @partial(jax.jit, static_argnums=(0,))
     def after_reset(self, obs, state: SeaquestState):
-        timers = jnp.maximum(state.spawn_state.spawn_timers // 2, jnp.int32(80))
+        trigger = self._env.consts.DIVER_SPAWN_TIMER_TRIGGER.astype(jnp.int32)
+        # Halve opening delay once; never below the co-spawn trigger.
+        timers = jnp.maximum(state.spawn_state.spawn_timers // 2, trigger)
         spawn = state.spawn_state.replace(spawn_timers=timers)
         return obs, state.replace(spawn_state=spawn)
-
-    @partial(jax.jit, static_argnums=(0,))
-    def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
-        del prev_state
-        timers = jnp.maximum(new_state.spawn_state.spawn_timers // 2, jnp.int32(80))
-        spawn = new_state.spawn_state.replace(spawn_timers=timers)
-        return new_state.replace(spawn_state=spawn)
 
 
 class FastOxygenDrainMod(JaxAtariPostStepModPlugin):
@@ -421,7 +504,11 @@ class LethalDiversMod(JaxAtariPostStepModPlugin):
         should_die = jnp.logical_and(diver_hit, jnp.logical_not(already_dying))
         new_spawn = jax.lax.cond(
             should_die,
-            lambda s: self._env.soft_reset_spawn_state(s),
+            lambda s: self._env.soft_reset_spawn_state(
+                s,
+                rearm_divers=True,
+                rng=jax.random.fold_in(new_state.rng_key, new_state.step_counter),
+            ),
             lambda s: s,
             new_state.spawn_state,
         )
@@ -1227,8 +1314,11 @@ class MicroSwarmMod(JaxAtariPostStepModPlugin):
 
     @partial(jax.jit, static_argnums=(0,))
     def after_reset(self, obs, state: SeaquestState):
-        # Shorten once; do NOT clamp every frame (that freezes timers at 40 forever).
-        timers = jnp.maximum(state.spawn_state.spawn_timers // 3, jnp.int32(40))
+        # Shorten only the pre-trigger delay. Flooring absolute timers below
+        # DIVER_SPAWN_TIMER_TRIGGER (128) skips the co-spawn tick forever.
+        trigger = self._env.consts.DIVER_SPAWN_TIMER_TRIGGER.astype(jnp.int32)
+        delay = jnp.maximum(state.spawn_state.spawn_timers - trigger, jnp.int32(0))
+        timers = trigger + delay // 3
         spawn = state.spawn_state.replace(spawn_timers=timers)
         return obs, state.replace(spawn_state=spawn)
 

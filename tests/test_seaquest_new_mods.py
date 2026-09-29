@@ -80,30 +80,54 @@ def test_continuous_random_spawns_holds_y():
     env = make("seaquest", mods=["continuous_random_spawns"])
     core = _base_env(env)
     _, state = env.reset(jax.random.PRNGKey(7))
-    from jaxatari.games.mods.seaquest.seaquest_mod_plugins import ContinuousRandomSpawnsMod
+    ys = [int(y) for y in core.consts.SPAWN_POSITIONS_Y]
+    # Seed a live shark with a non-lane Y; next step must preserve it (not snap).
+    held_y = jnp.int32((ys[0] + ys[-1]) // 2)
+    sharks = jnp.zeros_like(state.shark_positions).at[0].set(
+        jnp.array([40, held_y, 1], dtype=state.shark_positions.dtype)
+    )
+    state = state.replace(
+        shark_positions=sharks,
+        sub_positions=jnp.zeros_like(state.sub_positions),
+        diver_positions=jnp.zeros_like(state.diver_positions),
+        player_x=jnp.int32(100),
+        player_y=jnp.int32(ys[-1]),
+    )
+    _, state2, *_ = env.step(state, jnp.int32(0))
+    assert int(state2.shark_positions[0, 1]) == int(held_y)
+    assert 50 <= int(held_y) <= 160
 
-    plugin = ContinuousRandomSpawnsMod()
-    plugin._env = core
-    # Spawn into slot 0.
-    prev = state.replace(
-        shark_positions=state.shark_positions.at[0].set(jnp.zeros(3, dtype=state.shark_positions.dtype))
+
+def test_random_spawns_collision_matches_visual_y():
+    """Hitboxes must use the random Y — not the stock lane — or remote deaths occur."""
+    env = make("seaquest", mods=["random_spawns"])
+    core = _base_env(env)
+    _, state = env.reset(jax.random.PRNGKey(11))
+    ys = [int(y) for y in core.consts.SPAWN_POSITIONS_Y]
+    visual_y = jnp.int32(ys[2])
+    # Shark visually at deep lane; player sitting on stock lane-0 Y at same X.
+    sharks = jnp.zeros_like(state.shark_positions).at[0].set(
+        jnp.array([80, visual_y, 1], dtype=state.shark_positions.dtype)
     )
-    spawned = state.replace(
-        shark_positions=state.shark_positions.at[0].set(
-            jnp.array([20, 95, 1], dtype=state.shark_positions.dtype)
-        )
+    state = state.replace(
+        shark_positions=sharks,
+        sub_positions=jnp.zeros_like(state.sub_positions),
+        diver_positions=jnp.zeros_like(state.diver_positions),
+        enemy_missile_positions=jnp.zeros_like(state.enemy_missile_positions),
+        surface_sub_position=jnp.zeros(3, dtype=state.surface_sub_position.dtype),
+        player_x=jnp.int32(80),
+        player_y=jnp.int32(ys[0]),
+        lives=jnp.int32(3),
+        death_counter=jnp.int32(0),
     )
-    after_spawn = plugin.run(prev, spawned)
-    y0 = int(after_spawn.shark_positions[0, 1])
-    assert 50 <= y0 <= 140
-    # Next frame: movement would snap to lane Y; mod should hold continuous Y.
-    moved = after_spawn.replace(
-        shark_positions=after_spawn.shark_positions.at[0].set(
-            jnp.array([21, 95, 1], dtype=state.shark_positions.dtype)
-        )
-    )
-    after_hold = plugin.run(after_spawn, moved)
-    assert int(after_hold.shark_positions[0, 1]) == y0
+    lives_before = int(state.lives)
+    _, state2, *_ = env.step(state, jnp.int32(0))
+    assert int(state2.lives) == lives_before
+    assert int(state2.death_counter) == 0
+    # Player overlapping the *visual* shark must still die.
+    state_hit = state.replace(player_y=visual_y, lives=jnp.int32(3))
+    _, state3, *_ = env.step(state_hit, jnp.int32(0))
+    assert int(state3.death_counter) > 0 or int(state3.lives) < 3
 
 
 def test_dynamic_lane_drift_moves_lanes():
@@ -272,14 +296,129 @@ def test_lane_scramble_remaps_y():
     env = make("seaquest", mods=["lane_scramble"])
     core = _base_env(env)
     _, state = env.reset(jax.random.PRNGKey(13))
-    from jaxatari.games.mods.seaquest.seaquest_mod_plugins import LaneScrambleMod
-
-    plugin = LaneScrambleMod()
-    plugin._env = core
-    sharks = state.shark_positions.at[0].set(
-        jnp.array([40, 71, 1], dtype=state.shark_positions.dtype)
+    ys = [int(y) for y in core.consts.SPAWN_POSITIONS_Y]
+    sharks = jnp.zeros_like(state.shark_positions).at[0].set(
+        jnp.array([40, ys[0], 1], dtype=state.shark_positions.dtype)
     )
-    # Epoch 1 → perm (1,0,3,2): lane 0 → band of lane 1 (y=95)
-    state = state.replace(shark_positions=sharks, step_counter=jnp.int32(90))
-    out = plugin.run(state, state)
-    assert int(out.shark_positions[0, 1]) == 95
+    # Epoch 1 → perm (1,0,3,2): lane 0 → band of lane 1
+    state = state.replace(
+        shark_positions=sharks,
+        sub_positions=jnp.zeros_like(state.sub_positions),
+        diver_positions=jnp.zeros_like(state.diver_positions),
+        step_counter=jnp.int32(90),
+        player_x=jnp.int32(120),
+        player_y=jnp.int32(ys[-1]),
+    )
+    _, state2, *_ = env.step(state, jnp.int32(0))
+    # Remap lands on lane-1 band; shark bob may add ± a few px.
+    assert abs(int(state2.shark_positions[0, 1]) - ys[1]) <= 4
+
+
+def test_lane_scramble_does_not_teleport_onto_player():
+    env = make("seaquest", mods=["lane_scramble"])
+    core = _base_env(env)
+    _, state = env.reset(jax.random.PRNGKey(14))
+    ys = [int(y) for y in core.consts.SPAWN_POSITIONS_Y]
+    # Epoch 2 → perm (2,3,0,1): lane 0 → band of lane 2. Player sits there.
+    # Prev frame (epoch 1) kept shark on lane-1 band.
+    sharks_prev = jnp.zeros_like(state.shark_positions).at[0].set(
+        jnp.array([80, ys[1], 1], dtype=state.shark_positions.dtype)
+    )
+    state = state.replace(
+        shark_positions=sharks_prev,
+        sub_positions=jnp.zeros_like(state.sub_positions),
+        diver_positions=jnp.zeros_like(state.diver_positions),
+        enemy_missile_positions=jnp.zeros_like(state.enemy_missile_positions),
+        surface_sub_position=jnp.zeros(3, dtype=state.surface_sub_position.dtype),
+        player_x=jnp.int32(80),
+        player_y=jnp.int32(ys[2]),
+        step_counter=jnp.int32(180),
+        lives=jnp.int32(3),
+        death_counter=jnp.int32(0),
+    )
+    _, state2, *_ = env.step(state, jnp.int32(0))
+    shark = state2.shark_positions[0]
+    # Must not land on the player / kill them via teleport.
+    assert int(state2.death_counter) == 0
+    assert int(state2.lives) == 3
+    overlaps = bool(
+        core.check_collision_single(
+            jnp.array([state2.player_x, state2.player_y]),
+            core.consts.PLAYER_SIZE,
+            shark[:2],
+            core.consts.SHARK_SIZE,
+        )
+    )
+    assert not overlaps
+
+
+def test_swap_diver_shark_roles_collects_shark_kills_on_diver():
+    """Physics swap: shark contact rescues; diver contact starts death; torpedo clears divers."""
+    env = make("seaquest", mods=["swap_diver_shark_roles"])
+    core = _base_env(env)
+    _, state = env.reset(jax.random.PRNGKey(11))
+
+    # Place a live shark on the player — should collect, not die.
+    shark = jnp.array(
+        [int(state.player_x), int(state.player_y), 1],
+        dtype=state.shark_positions.dtype,
+    )
+    state_shark = state.replace(
+        shark_positions=state.shark_positions.at[0].set(shark),
+        divers_collected=jnp.int32(0),
+        death_counter=jnp.int32(0),
+    )
+    from jaxatari.games.mods.seaquest.seaquest_mod_plugins import (
+        CollectSharksOnContactMod,
+        LethalDiversMod,
+        ShootableDiversMod,
+    )
+
+    collect = CollectSharksOnContactMod()
+    collect._env = core
+    after_shark = collect.run(state_shark, state_shark)
+    assert int(after_shark.divers_collected) == 1
+    assert int(after_shark.shark_positions[0, 2]) == 0
+    assert int(after_shark.death_counter) == 0
+
+    # Place a live diver on the player — should trigger death animation.
+    diver = jnp.array(
+        [int(state.player_x), int(state.player_y), 1],
+        dtype=state.diver_positions.dtype,
+    )
+    state_diver = state.replace(
+        diver_positions=state.diver_positions.at[0].set(diver),
+        death_counter=jnp.int32(0),
+    )
+    lethal = LethalDiversMod()
+    lethal._env = core
+    after_diver = lethal.run(state_diver, state_diver)
+    assert int(after_diver.death_counter) == 90
+
+    # Torpedo on a diver — should clear the slot and award kill points.
+    state_shot = state.replace(
+        diver_positions=state.diver_positions.at[0].set(diver),
+        player_missile_position=jnp.array(
+            [int(state.player_x), int(state.player_y), 1],
+            dtype=state.player_missile_position.dtype,
+        ),
+        score=jnp.int32(0),
+        successful_rescues=jnp.int32(0),
+    )
+    shoot = ShootableDiversMod()
+    shoot._env = core
+    after_shot = shoot.run(state_shot, state_shot)
+    assert int(after_shot.diver_positions[0, 2]) == 0
+    assert int(after_shot.player_missile_position[2]) == 0
+    assert int(after_shot.score) == int(core.calculate_kill_points(jnp.int32(0)))
+
+
+def test_swap_diver_shark_roles_reset_and_step():
+    env = make("seaquest", mods=["swap_diver_shark_roles"])
+    key = jax.random.PRNGKey(0)
+    obs, state = env.reset(key)
+    obs2, state2, reward, done, info = env.step(state, jnp.int32(0))
+    assert obs is not None
+    assert obs2 is not None
+    _ = float(reward)
+    _ = bool(done)

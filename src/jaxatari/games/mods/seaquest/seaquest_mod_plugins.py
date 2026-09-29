@@ -586,6 +586,60 @@ class PenalizeDiverShootingMod(JaxAtariPostStepModPlugin):
         )
 
 
+class ShootableDiversMod(JaxAtariPostStepModPlugin):
+    """Torpedoes destroy divers and award kill points (stock Seaquest ignores them).
+
+    Used by ``swap_diver_shark_roles`` so DESTROY skills can clear lethal divers.
+    Distinct from ``penalize_diver_shooting`` (removes but subtracts score).
+    """
+
+    conflicts_with = ["penalize_diver_shooting"]
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
+        del prev_state
+        missile_pos = new_state.player_missile_position
+        missile_active = missile_pos[2] != 0
+        kill_pts = self._env.calculate_kill_points(new_state.successful_rescues)
+
+        missile_xy = missile_pos[:2]
+        missile_size = self._env.consts.MISSILE_SIZE
+        diver_size = self._env.consts.DIVER_SIZE
+
+        def check_diver(i, carry):
+            state, missile_gone = carry
+            diver_pos = state.diver_positions[i]
+
+            should_check = jnp.logical_and(diver_pos[2] != 0, jnp.logical_not(missile_gone))
+            collision = self._env.check_collision_single(
+                missile_xy,
+                missile_size,
+                jnp.array([diver_pos[0], diver_pos[1]]),
+                diver_size,
+            )
+            hit = jnp.logical_and(should_check, collision)
+
+            state = state.replace(
+                diver_positions=state.diver_positions.at[i].set(
+                    jnp.where(hit, jnp.zeros(3, dtype=diver_pos.dtype), diver_pos)
+                ),
+                score=jnp.where(hit, state.score + kill_pts, state.score),
+                player_missile_position=jnp.where(
+                    hit,
+                    jnp.zeros(3, dtype=state.player_missile_position.dtype),
+                    state.player_missile_position,
+                ),
+            )
+            return state, jnp.logical_or(missile_gone, hit)
+
+        return jax.lax.cond(
+            missile_active,
+            lambda s: jax.lax.fori_loop(0, 4, check_diver, (s, jnp.array(False)))[0],
+            lambda s: s,
+            new_state,
+        )
+
+
 class PeacefulSharksOnlyMod(JaxAtariInternalModPlugin):
     """Internal helper: shark contact no longer kills (subs/missiles/surface still do)."""
 
@@ -673,6 +727,47 @@ class CollectSharksOnContactMod(JaxAtariPostStepModPlugin):
             )
 
         return jax.lax.fori_loop(0, new_state.shark_positions.shape[0], _collect_one, new_state)
+
+
+class DisableDiverCollectMod(JaxAtariInternalModPlugin):
+    """Divers keep moving/spawning, but player contact no longer fills a rescue slot.
+
+    Used by ``swap_diver_shark_roles`` so divers are threats only (see LethalDiversMod)
+    while sharks become the collectable resource (CollectSharksOnContactMod).
+    """
+
+    conflicts_with = ["no_divers"]
+
+    @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
+    def step_diver_movement(
+        self,
+        diver_positions: chex.Array,
+        shark_positions: chex.Array,
+        sub_positions: chex.Array,
+        state_player_x: chex.Array,
+        state_player_y: chex.Array,
+        state_divers_collected: chex.Array,
+        spawn_state: SpawnState,
+        step_counter: chex.Array,
+        rng: chex.PRNGKey,
+    ):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        # Force can_collect=False inside the base loop (collected < 6 gate), then
+        # restore the real rescue count so shark-collection still surfaces.
+        new_pos, _ignored_collected, new_spawn, new_rng = JaxSeaquest.step_diver_movement(
+            self._env,
+            diver_positions,
+            shark_positions,
+            sub_positions,
+            state_player_x,
+            state_player_y,
+            jnp.int32(6),
+            spawn_state,
+            step_counter,
+            rng,
+        )
+        return new_pos, state_divers_collected, new_spawn, new_rng
 
 
 class SwapDiverEnemyLabelsMod(JaxAtariInternalModPlugin):
@@ -1120,33 +1215,65 @@ class TinyDiversMod(JaxAtariInternalModPlugin):
 # ---------------------------------------------------------------------------
 
 
-class DynamicLaneDriftMod(JaxAtariPostStepModPlugin):
+class DynamicLaneDriftMod(JaxAtariInternalModPlugin):
     """Bucket B: lanes slowly oscillate vertically with per-lane phase.
 
     Unlike ``vertical_oscillation`` (fast shared wobble), each lane drifts on a
     slow sinusoid so absolute "safe bands" keep moving while relative geometry
     stays coherent for ego.
+
+    Applied inside ``spawn_step`` / diver movement so collision uses the drifted
+    Y (a post-step-only remap left lethal hitboxes on the stock lanes).
     """
 
-    conflicts_with = ["vertical_oscillation", "continuous_random_spawns", "random_spawns"]
+    conflicts_with = [
+        "vertical_oscillation",
+        "continuous_random_spawns",
+        "random_spawns",
+        "lane_scramble",
+        "shift_lanes",
+    ]
 
     AMPLITUDE = 10.0
     FREQ = 0.035  # ~180 frames per cycle
     PHASES = (0.0, 1.7, 3.4, 5.1)
 
     @partial(jax.jit, static_argnums=(0,))
-    def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
-        del prev_state
-        t = new_state.step_counter.astype(jnp.float32)
+    def spawn_step(
+        self,
+        state,
+        spawn_state,
+        shark_positions,
+        sub_positions,
+        diver_positions,
+        rng_key,
+    ):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        (
+            new_spawn_state,
+            new_sharks,
+            new_subs,
+            new_divers,
+            new_key,
+        ) = JaxSeaquest.spawn_step(
+            self._env,
+            state,
+            spawn_state,
+            shark_positions,
+            sub_positions,
+            diver_positions,
+            rng_key,
+        )
+        t = state.step_counter.astype(jnp.float32)
         phases = jnp.array(self.PHASES, dtype=jnp.float32)
-        lane_offsets = (
-            self.AMPLITUDE * jnp.sin(t * self.FREQ + phases)
-        ).astype(jnp.int32)  # (4,)
+        lane_offsets = (self.AMPLITUDE * jnp.sin(t * self.FREQ + phases)).astype(
+            jnp.int32
+        )
         y_min = jnp.int32(46)
         y_max = jnp.int32(self._env.consts.PLAYER_BOUNDS[1, 1])
 
-        def _drift_lane_entities(positions):
-            # positions: (12, 3) = 4 lanes × 3 slots
+        def _drift_enemies(positions):
             reshaped = positions.reshape(4, 3, 3)
 
             def _lane(lane_i, lane_pos):
@@ -1159,11 +1286,9 @@ class DynamicLaneDriftMod(JaxAtariPostStepModPlugin):
 
                 return jax.vmap(_one)(lane_pos)
 
-            drifted = jax.vmap(_lane)(jnp.arange(4), reshaped)
-            return drifted.reshape(positions.shape)
+            return jax.vmap(_lane)(jnp.arange(4), reshaped).reshape(positions.shape)
 
         def _drift_divers(positions):
-            # divers: (4, 3) — one slot per lane
             def _one(lane_i, pos):
                 active = pos[2] != 0
                 new_y = jnp.clip(pos[1] + lane_offsets[lane_i], y_min, y_max)
@@ -1171,20 +1296,113 @@ class DynamicLaneDriftMod(JaxAtariPostStepModPlugin):
 
             return jax.vmap(_one)(jnp.arange(4), positions)
 
-        return new_state.replace(
-            shark_positions=_drift_lane_entities(new_state.shark_positions),
-            sub_positions=_drift_lane_entities(new_state.sub_positions),
-            diver_positions=_drift_divers(new_state.diver_positions),
+        return (
+            new_spawn_state,
+            _drift_enemies(new_sharks),
+            _drift_enemies(new_subs),
+            _drift_divers(new_divers),
+            new_key,
         )
 
+    @partial(jax.jit, static_argnums=(0,))
+    def step_diver_movement(
+        self,
+        diver_positions,
+        shark_positions,
+        sub_positions,
+        state_player_x,
+        state_player_y,
+        state_divers_collected,
+        spawn_state,
+        step_counter,
+        rng,
+    ):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
 
-class ContinuousRandomSpawnsMod(JaxAtariPostStepModPlugin):
+        final_pos, final_collected, new_spawn_state, new_rng = (
+            JaxSeaquest.step_diver_movement(
+                self._env,
+                diver_positions,
+                shark_positions,
+                sub_positions,
+                state_player_x,
+                state_player_y,
+                state_divers_collected,
+                spawn_state,
+                step_counter,
+                rng,
+            )
+        )
+        t = step_counter.astype(jnp.float32)
+        phases = jnp.array(self.PHASES, dtype=jnp.float32)
+        lane_offsets = (self.AMPLITUDE * jnp.sin(t * self.FREQ + phases)).astype(
+            jnp.int32
+        )
+        y_min = jnp.int32(46)
+        y_max = jnp.int32(self._env.consts.PLAYER_BOUNDS[1, 1])
+
+        def _one(lane_i, pos):
+            active = pos[2] != 0
+            new_y = jnp.clip(pos[1] + lane_offsets[lane_i], y_min, y_max)
+            return jnp.where(active, pos.at[1].set(new_y), pos)
+
+        final_pos = jax.vmap(_one)(jnp.arange(4), final_pos)
+        return final_pos, final_collected, new_spawn_state, new_rng
+
+    @partial(jax.jit, static_argnums=(0,))
+    def enemy_missiles_step(
+        self,
+        curr_sub_positions,
+        curr_enemy_missile_positions,
+        step_counter,
+        difficulty,
+    ):
+        """Missiles follow drifted sub Y."""
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        lanes = self._env.consts.SPAWN_POSITIONS_Y.astype(jnp.int32)
+        stock_missile_y = self._env.consts.ENEMY_MISSILE_Y.astype(jnp.int32)
+        y_off = stock_missile_y - lanes
+        all_lane_subs = curr_sub_positions.reshape(4, 3, 3)
+
+        def lane_missile_y(lane_i, lane_subs):
+            front = self._env.get_front_entity(0, lane_subs)
+            return jnp.where(
+                front[2] != 0,
+                front[1] + y_off[lane_i],
+                stock_missile_y[lane_i],
+            )
+
+        missile_ys = jax.vmap(lane_missile_y)(jnp.arange(4), all_lane_subs)
+        stock = JaxSeaquest.enemy_missiles_step(
+            self._env,
+            curr_sub_positions,
+            curr_enemy_missile_positions,
+            step_counter,
+            difficulty,
+        )
+
+        def _fix(missile, lane_y):
+            active = missile[2] != 0
+            return jnp.where(
+                active, missile.at[1].set(lane_y.astype(missile.dtype)), missile
+            )
+
+        return jax.vmap(_fix)(stock, missile_ys)
+
+
+class ContinuousRandomSpawnsMod(JaxAtariInternalModPlugin):
     """Bucket B: rip the lane grid — random Y on spawn for sharks, subs, divers.
 
-    Spawn still goes through Seaquest's lane slots (engine requirement), but
-    immediately after inactive→active we sample Y within the stock lane Y-band and hold
-    it for the slot's lifetime (base step would otherwise snap back to
-    ``SPAWN_POSITIONS_Y``). Effectively: no lanes for anyone.
+    Spawn still goes through Seaquest's lane slots (engine requirement), but on
+    inactive→active we sample Y within the stock lane band and **keep that Y
+    through movement + collision** (base ``step_enemy_movement`` would otherwise
+    snap back to ``SPAWN_POSITIONS_Y`` every frame).
+
+    Important: this cannot be a post-step-only remapping. Collision runs *inside*
+    ``step`` before post-step mods, so a post-step Y rewrite left lethal hitboxes
+    on the original lane while sprites floated elsewhere — remote phantom deaths
+    when opposite-lane sharks visually crossed away from the player.
     """
 
     conflicts_with = [
@@ -1194,52 +1412,167 @@ class ContinuousRandomSpawnsMod(JaxAtariPostStepModPlugin):
         "lane_scramble",
     ]
 
+    @staticmethod
+    def _keep_y(prev_pos, new_pos):
+        """Preserve Y across a move for slots that stay alive."""
+        still_active = jnp.logical_and(prev_pos[2] != 0, new_pos[2] != 0)
+        return jnp.where(still_active, new_pos.at[1].set(prev_pos[1]), new_pos)
+
+    @staticmethod
+    def _sample_spawn_y(prev_pos, new_pos, slot_rng, y_min, y_max):
+        was_inactive = prev_pos[2] == 0
+        now_active = new_pos[2] != 0
+        just_spawned = jnp.logical_and(was_inactive, now_active)
+        rand_y = jax.random.randint(slot_rng, (), y_min, y_max + 1)
+        return jnp.where(
+            just_spawned,
+            new_pos.at[1].set(rand_y.astype(new_pos.dtype)),
+            new_pos,
+        )
+
     @partial(jax.jit, static_argnums=(0,))
-    def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
-        # Clamp to stock lane band so nothing spawns above the top lane
-        # (near-surface hunting → unintended surfacing deaths).
+    def step_enemy_movement(
+        self, spawn_state, shark_positions, sub_positions, step_counter, rng
+    ):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        new_sharks, new_subs, new_spawn_state, new_rng = JaxSeaquest.step_enemy_movement(
+            self._env, spawn_state, shark_positions, sub_positions, step_counter, rng
+        )
+        new_sharks = jax.vmap(self._keep_y)(shark_positions, new_sharks)
+        new_subs = jax.vmap(self._keep_y)(sub_positions, new_subs)
+        return new_sharks, new_subs, new_spawn_state, new_rng
+
+    @partial(jax.jit, static_argnums=(0,))
+    def spawn_step(
+        self,
+        state,
+        spawn_state,
+        shark_positions,
+        sub_positions,
+        diver_positions,
+        rng_key,
+    ):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        (
+            new_spawn_state,
+            new_sharks,
+            new_subs,
+            new_divers,
+            new_key,
+        ) = JaxSeaquest.spawn_step(
+            self._env,
+            state,
+            spawn_state,
+            shark_positions,
+            sub_positions,
+            diver_positions,
+            rng_key,
+        )
         lanes = self._env.consts.SPAWN_POSITIONS_Y.astype(jnp.int32)
-        y_min = lanes[0]   # highest / topmost lane
-        y_max = lanes[-1]  # deepest lane
-        rng = new_state.rng_key
+        y_min = lanes[0]
+        y_max = lanes[-1]
 
-        def _reassign(prev_pos, new_pos, slot_rng):
-            was_inactive = prev_pos[2] == 0
-            now_active = new_pos[2] != 0
-            just_spawned = jnp.logical_and(was_inactive, now_active)
-            still_active = jnp.logical_and(jnp.logical_not(was_inactive), now_active)
-            rand_y = jax.random.randint(slot_rng, (), y_min, y_max + 1)
-            # Hold previous continuous Y while alive; sample on spawn.
-            held_y = jnp.where(still_active, prev_pos[1], rand_y)
-            new_y = jnp.where(now_active, held_y, new_pos[1])
-            # just_spawned uses rand_y; still_active uses prev; inactive keeps 0
-            new_y = jnp.where(just_spawned, rand_y, new_y)
-            return jnp.where(now_active, new_pos.at[1].set(new_y.astype(new_pos.dtype)), new_pos)
-
-        n_shark = new_state.shark_positions.shape[0]
-        n_sub = new_state.sub_positions.shape[0]
-        n_diver = new_state.diver_positions.shape[0]
-        keys = jax.random.split(rng, n_shark + n_sub + n_diver + 1)
+        n_shark = new_sharks.shape[0]
+        n_sub = new_subs.shape[0]
+        n_diver = new_divers.shape[0]
+        keys = jax.random.split(new_key, n_shark + n_sub + n_diver + 1)
         shark_keys = keys[:n_shark]
         sub_keys = keys[n_shark : n_shark + n_sub]
         diver_keys = keys[n_shark + n_sub : n_shark + n_sub + n_diver]
-        new_rng = keys[-1]
+        new_key = keys[-1]
 
-        new_sharks = jax.vmap(_reassign)(
-            prev_state.shark_positions, new_state.shark_positions, shark_keys
+        new_sharks = jax.vmap(
+            lambda p, n, k: self._sample_spawn_y(p, n, k, y_min, y_max)
+        )(shark_positions, new_sharks, shark_keys)
+        new_subs = jax.vmap(
+            lambda p, n, k: self._sample_spawn_y(p, n, k, y_min, y_max)
+        )(sub_positions, new_subs, sub_keys)
+        new_divers = jax.vmap(
+            lambda p, n, k: self._sample_spawn_y(p, n, k, y_min, y_max)
+        )(diver_positions, new_divers, diver_keys)
+
+        return new_spawn_state, new_sharks, new_subs, new_divers, new_key
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step_diver_movement(
+        self,
+        diver_positions,
+        shark_positions,
+        sub_positions,
+        state_player_x,
+        state_player_y,
+        state_divers_collected,
+        spawn_state,
+        step_counter,
+        rng,
+    ):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        final_pos, final_collected, new_spawn_state, new_rng = (
+            JaxSeaquest.step_diver_movement(
+                self._env,
+                diver_positions,
+                shark_positions,
+                sub_positions,
+                state_player_x,
+                state_player_y,
+                state_divers_collected,
+                spawn_state,
+                step_counter,
+                rng,
+            )
         )
-        new_subs = jax.vmap(_reassign)(
-            prev_state.sub_positions, new_state.sub_positions, sub_keys
+        final_pos = jax.vmap(self._keep_y)(diver_positions, final_pos)
+        return final_pos, final_collected, new_spawn_state, new_rng
+
+    @partial(jax.jit, static_argnums=(0,))
+    def enemy_missiles_step(
+        self,
+        curr_sub_positions,
+        curr_enemy_missile_positions,
+        step_counter,
+        difficulty,
+    ):
+        """Missiles track the live sub Y (not the stock lane ENEMY_MISSILE_Y)."""
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        # Stock missile Y is a fixed offset above SPAWN_POSITIONS_Y; keep that
+        # offset relative to the (possibly random) sub Y.
+        lanes = self._env.consts.SPAWN_POSITIONS_Y.astype(jnp.int32)
+        stock_missile_y = self._env.consts.ENEMY_MISSILE_Y.astype(jnp.int32)
+        y_off = stock_missile_y - lanes
+
+        all_lane_subs = curr_sub_positions.reshape(4, 3, 3)
+
+        def lane_missile_y(lane_i, lane_subs):
+            front = self._env.get_front_entity(0, lane_subs)
+            return jnp.where(
+                front[2] != 0,
+                front[1] + y_off[lane_i],
+                stock_missile_y[lane_i],
+            )
+
+        missile_ys = jax.vmap(lane_missile_y)(jnp.arange(4), all_lane_subs)
+
+        # Stock updater spawns/moves using lane Y; snap active missiles onto
+        # the live sub-relative Y so hitboxes match sprites.
+        stock = JaxSeaquest.enemy_missiles_step(
+            self._env,
+            curr_sub_positions,
+            curr_enemy_missile_positions,
+            step_counter,
+            difficulty,
         )
-        new_divers = jax.vmap(_reassign)(
-            prev_state.diver_positions, new_state.diver_positions, diver_keys
-        )
-        return new_state.replace(
-            shark_positions=new_sharks,
-            sub_positions=new_subs,
-            diver_positions=new_divers,
-            rng_key=new_rng,
-        )
+
+        def _fix(missile, lane_y):
+            active = missile[2] != 0
+            return jnp.where(
+                active, missile.at[1].set(lane_y.astype(missile.dtype)), missile
+            )
+
+        return jax.vmap(_fix)(stock, missile_ys)
 
 
 class OceanCurrentsMod(JaxAtariPostStepModPlugin):
@@ -1510,11 +1843,17 @@ class SlipperyTurnMod(JaxAtariInternalModPlugin):
         return player_x, player_y, player_direction
 
 
-class LaneScrambleMod(JaxAtariPostStepModPlugin):
+class LaneScrambleMod(JaxAtariInternalModPlugin):
     """Bucket B: periodically permute which lane owns which Y band.
 
     Discrete reshuffle (not slow drift): absolute safe-zones jump; relative
     within-lane structure stays intact.
+
+    Applied *inside* ``spawn_step`` / diver movement so collision uses the
+    remapped Y (a post-step-only remap left hitboxes on the stock lanes).
+
+    Epoch changes that would land a lethal entity on the player keep that
+    entity's previous Y until the remapped slot is clear.
     """
 
     conflicts_with = [
@@ -1526,7 +1865,6 @@ class LaneScrambleMod(JaxAtariPostStepModPlugin):
     ]
 
     PERIOD = 90
-    # Fixed set of permutations of lanes [0,1,2,3].
     PERMS = (
         (0, 1, 2, 3),
         (1, 0, 3, 2),
@@ -1537,20 +1875,41 @@ class LaneScrambleMod(JaxAtariPostStepModPlugin):
     )
 
     @partial(jax.jit, static_argnums=(0,))
-    def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
-        del prev_state
+    def spawn_step(
+        self,
+        state,
+        spawn_state,
+        shark_positions,
+        sub_positions,
+        diver_positions,
+        rng_key,
+    ):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        (
+            new_spawn_state,
+            new_sharks,
+            new_subs,
+            new_divers,
+            new_key,
+        ) = JaxSeaquest.spawn_step(
+            self._env,
+            state,
+            spawn_state,
+            shark_positions,
+            sub_positions,
+            diver_positions,
+            rng_key,
+        )
         base_ys = self._env.consts.SPAWN_POSITIONS_Y.astype(jnp.int32)
         perms = jnp.array(self.PERMS, dtype=jnp.int32)
-        epoch = (new_state.step_counter // self.PERIOD) % perms.shape[0]
-        perm = perms[epoch]  # lane i → band perm[i]
+        perm = perms[(state.step_counter // self.PERIOD) % perms.shape[0]]
 
         def _scramble_enemies(positions):
             lanes = positions.reshape(4, 3, 3)
 
             def _lane(lane_i, lane_pos):
-                src_y = base_ys[lane_i]
-                dst_y = base_ys[perm[lane_i]]
-                delta = dst_y - src_y
+                delta = base_ys[perm[lane_i]] - base_ys[lane_i]
 
                 def _one(pos):
                     active = pos[2] != 0
@@ -1568,10 +1927,110 @@ class LaneScrambleMod(JaxAtariPostStepModPlugin):
 
             return jax.vmap(_one)(jnp.arange(4), positions)
 
-        return new_state.replace(
-            shark_positions=_scramble_enemies(new_state.shark_positions),
-            sub_positions=_scramble_enemies(new_state.sub_positions),
-            diver_positions=_scramble_divers(new_state.diver_positions),
+        new_sharks = _scramble_enemies(new_sharks)
+        new_subs = _scramble_enemies(new_subs)
+        new_divers = _scramble_divers(new_divers)
+
+        player_xy = jnp.array([state.player_x, state.player_y])
+        player_size = self._env.consts.PLAYER_SIZE
+
+        def _reject(scrambled, prev_pos, enemy_size):
+            def _one(scr, prev):
+                active = scr[2] != 0
+                overlaps = jnp.logical_and(
+                    active,
+                    self._env.check_collision_single(
+                        player_xy, player_size, scr[:2], enemy_size
+                    ),
+                )
+                return jnp.where(overlaps, scr.at[1].set(prev[1]), scr)
+
+            return jax.vmap(_one)(scrambled, prev_pos)
+
+        new_sharks = _reject(new_sharks, shark_positions, self._env.consts.SHARK_SIZE)
+        new_subs = _reject(new_subs, sub_positions, self._env.consts.ENEMY_SUB_SIZE)
+        return new_spawn_state, new_sharks, new_subs, new_divers, new_key
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step_diver_movement(
+        self,
+        diver_positions,
+        shark_positions,
+        sub_positions,
+        state_player_x,
+        state_player_y,
+        state_divers_collected,
+        spawn_state,
+        step_counter,
+        rng,
+    ):
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        final_pos, final_collected, new_spawn_state, new_rng = (
+            JaxSeaquest.step_diver_movement(
+                self._env,
+                diver_positions,
+                shark_positions,
+                sub_positions,
+                state_player_x,
+                state_player_y,
+                state_divers_collected,
+                spawn_state,
+                step_counter,
+                rng,
+            )
         )
+        base_ys = self._env.consts.SPAWN_POSITIONS_Y.astype(jnp.int32)
+        perms = jnp.array(self.PERMS, dtype=jnp.int32)
+        perm = perms[(step_counter // self.PERIOD) % perms.shape[0]]
+
+        def _one(lane_i, pos):
+            active = pos[2] != 0
+            delta = base_ys[perm[lane_i]] - base_ys[lane_i]
+            return jnp.where(active, pos.at[1].set(pos[1] + delta), pos)
+
+        final_pos = jax.vmap(_one)(jnp.arange(4), final_pos)
+        return final_pos, final_collected, new_spawn_state, new_rng
+
+    @partial(jax.jit, static_argnums=(0,))
+    def enemy_missiles_step(
+        self,
+        curr_sub_positions,
+        curr_enemy_missile_positions,
+        step_counter,
+        difficulty,
+    ):
+        """Missiles follow scrambled sub Y (same offset as stock lane missiles)."""
+        from jaxatari.games.jax_seaquest import JaxSeaquest
+
+        lanes = self._env.consts.SPAWN_POSITIONS_Y.astype(jnp.int32)
+        stock_missile_y = self._env.consts.ENEMY_MISSILE_Y.astype(jnp.int32)
+        y_off = stock_missile_y - lanes
+        all_lane_subs = curr_sub_positions.reshape(4, 3, 3)
+
+        def lane_missile_y(lane_i, lane_subs):
+            front = self._env.get_front_entity(0, lane_subs)
+            return jnp.where(
+                front[2] != 0,
+                front[1] + y_off[lane_i],
+                stock_missile_y[lane_i],
+            )
+
+        missile_ys = jax.vmap(lane_missile_y)(jnp.arange(4), all_lane_subs)
+        stock = JaxSeaquest.enemy_missiles_step(
+            self._env,
+            curr_sub_positions,
+            curr_enemy_missile_positions,
+            step_counter,
+            difficulty,
+        )
+
+        def _fix(missile, lane_y):
+            active = missile[2] != 0
+            return jnp.where(
+                active, missile.at[1].set(lane_y.astype(missile.dtype)), missile
+            )
+
+        return jax.vmap(_fix)(stock, missile_ys)
 
 

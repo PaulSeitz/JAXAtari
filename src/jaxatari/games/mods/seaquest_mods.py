@@ -30,8 +30,10 @@ from jaxatari.games.mods.seaquest.seaquest_mod_plugins import (
     LethalDiversMod,
     NoEnemiesMod,
     PenalizeDiverShootingMod,
+    ShootableDiversMod,
     PeacefulSharksOnlyMod,
     CollectSharksOnContactMod,
+    DisableDiverCollectMod,
     SwapDiverEnemyLabelsMod,
     ExtraEnemyTypeMod,
     NoSurfacingDeathMod,
@@ -87,8 +89,22 @@ class SeaquestEnvMod(JaxAtariModController):
         # Planned paper_eval additions
         "_peaceful_sharks": PeacefulSharksOnlyMod,
         "_collect_sharks": CollectSharksOnContactMod,
+        "_disable_diver_collect": DisableDiverCollectMod,
+        "_shootable_divers": ShootableDiversMod,
         "collectable_sharks": ["_peaceful_sharks", "_collect_sharks"],
-        "swap_diver_enemy_labels": SwapDiverEnemyLabelsMod,
+        # True E2 role swap: sharks collectable + peaceful; divers lethal,
+        # uncollectable, and shootable (stock missiles ignore divers).
+        # Pair with CBL SEAQUEST_SWAP_DIVER_SHARK_ROLES (paper_eval relabel) so
+        # COLLECT↔DESTROY follow the new physics. Distinct from sprite/OC-only
+        # ``swap_diver_enemy_labels``.
+        "swap_diver_shark_roles": [
+            "_peaceful_sharks",
+            "_collect_sharks",
+            "_disable_diver_collect",
+            "_shootable_divers",
+            "lethal_divers",
+        ],
+        "shootable_divers": ShootableDiversMod,        "swap_diver_enemy_labels": SwapDiverEnemyLabelsMod,
         "extra_enemy_type": ExtraEnemyTypeMod,
         "new_pattern": ExtraEnemyTypeMod,  # alias
         "penalize_diver_shooting": PenalizeDiverShootingMod,

@@ -2478,8 +2478,13 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         )
 
         # --- Divers ---
+        # Clip x into the playfield for consumers that expect screen coords, but
+        # mark off-screen divers inactive so heuristics / skills ignore them.
         d_pos = state.diver_positions
-        d_active = (d_pos[:, 2] != 0).astype(jnp.int32)
+        d_alive = d_pos[:, 2] != 0
+        d_w = jnp.int32(c.DIVER_SIZE[0])
+        d_onscreen = jnp.logical_and(d_pos[:, 0] < w, (d_pos[:, 0] + d_w) > 0)
+        d_active = jnp.logical_and(d_alive, d_onscreen).astype(jnp.int32)
         divers = ObjectObservation.create(
             x=jnp.clip(d_pos[:, 0].astype(jnp.int32), 0, w),
             y=jnp.clip(d_pos[:, 1].astype(jnp.int32), 0, h),
@@ -2514,7 +2519,14 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         e_vid = jnp.concatenate([sharks_vid, subs_vid, surf_vid])
         e_w = jnp.concatenate([sharks_w, subs_w, surf_w])
         e_h = jnp.concatenate([sharks_h, subs_h, surf_h])
-        e_active = (e_pos[:, 2] != 0).astype(jnp.int32)
+        e_alive = e_pos[:, 2] != 0
+        # Same gate as enemy_is_hittable: alive off-screen stays in state, but
+        # observation.active=0 so clipped x cannot fake an on-screen target.
+        e_onscreen = jnp.logical_and(
+            e_pos[:, 0] >= c.ENEMY_HITTABLE_X_MIN,
+            e_pos[:, 0] < c.ENEMY_HITTABLE_X_MAX,
+        )
+        e_active = jnp.logical_and(e_alive, e_onscreen).astype(jnp.int32)
 
         enemies = ObjectObservation.create(
             x=jnp.clip(e_pos[:, 0].astype(jnp.int32), 0, w),
@@ -2538,7 +2550,9 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         # Concatenate projectiles
         p_pos = jnp.concatenate([pm_pos, em_pos])
         p_vid = jnp.concatenate([pm_vid, em_vid])
-        p_active = (p_pos[:, 2] != 0).astype(jnp.int32)
+        p_alive = p_pos[:, 2] != 0
+        p_onscreen = jnp.logical_and(p_pos[:, 0] < w, (p_pos[:, 0] + c.MISSILE_SIZE[0]) > 0)
+        p_active = jnp.logical_and(p_alive, p_onscreen).astype(jnp.int32)
 
         projectiles = ObjectObservation.create(
             x=jnp.clip(p_pos[:, 0].astype(jnp.int32), 0, w),

@@ -236,8 +236,8 @@ class SeaquestConstants(AutoDerivedConstants):
     )
     # After death / successful surface: each still-armed lane (da==1) rolls this
     # chance to co-spawn on the immediate next shark-trigger tick; losers wait
-    # for their lane's next regular clear→shark wave. Tune 0.25 vs 0.5 via PQN.
-    DIVER_INSTANT_SPAWN_PROB: float = 0.5
+    # for their lane's next regular clear→shark wave.
+    DIVER_INSTANT_SPAWN_PROB: float = struct.field(pytree_node=False, default=0.25)
     # Opening countdown from reset. Sized so the first co-spawn puts divers
     # on-screen with ALE (escort visibility still comes from ENEMY_SPAWN_X_*).
     INITIAL_SPAWN_TIMERS: jnp.ndarray = struct.field(
@@ -393,13 +393,18 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
           - successful surface: preserve collected (0); dismiss any live world
             divers into collected (0) so phantoms cannot place mid-cycle
 
-        Each still-armed lane then rolls ``DIVER_INSTANT_SPAWN_PROB`` to fire on
-        the next co-spawn tick; the rest wait for a normal shark wave.
+        Each still-armed lane then rolls ``DIVER_INSTANT_SPAWN_PROB`` to co-spawn
+        with the next escort wave (not alone ahead of enemies).
         """
         da = spawn_state.diver_array
         if diver_positions is not None:
             da = jnp.where(diver_positions[:, 2] != 0, jnp.int32(0), da)
         da = jnp.where(rearm_divers, jnp.ones_like(da), da)
+        # Surface/scoring can leave da all-0 (every lane collected / dismissed).
+        # Rearm here *before* the instant roll — otherwise step_diver_movement
+        # rearms next frame with no pending bits and all four timers stay synced
+        # → first post-surface wave always drops 4 divers.
+        da = jnp.where(jnp.all(da == 0), jnp.ones_like(da), da)
 
         prev_sub = jnp.where(
             rearm_divers,
@@ -414,14 +419,16 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
 
         timers = jnp.array(self.consts.INITIAL_SPAWN_TIMERS, dtype=jnp.int32)
         pending = jnp.zeros(4, dtype=jnp.int32)
+        # Always take an RNG when provided (call sites pass fold_in keys).
+        # Bernoulli(p) per armed lane — losers keep INITIAL timers and wait.
         if rng is not None:
-            # Armed lanes: with probability p, force-place on the next eligible
-            # shark co-spawn (survives surface O₂ freeze which rewrites timers).
-            rolls = jax.random.uniform(rng, shape=(4,))
-            pending = jnp.logical_and(
-                da == 1,
-                rolls < jnp.float32(self.consts.DIVER_INSTANT_SPAWN_PROB),
-            ).astype(jnp.int32)
+            p = jnp.float32(self.consts.DIVER_INSTANT_SPAWN_PROB)
+            hits = jax.random.bernoulli(rng, p=p, shape=(4,))
+            pending = jnp.logical_and(da == 1, hits).astype(jnp.int32)
+            trigger_p1 = (
+                self.consts.DIVER_SPAWN_TIMER_TRIGGER.astype(jnp.int32) + jnp.int32(1)
+            )
+            timers = jnp.where(pending.astype(bool), trigger_p1, timers)
 
         return spawn_state.replace(
             spawn_timers=timers,
@@ -1466,11 +1473,14 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         """
         # --- 1. Vectorized Pre-computation and Checks (for all 4 lanes at once) ---
 
-        # Timer at the shark co-spawn trigger, OR a death/surface instant-spawn roll.
-        # Pending survives SURFACE_FREEZE timer rewrites during O₂ refill.
+        # Divers only place on the shark co-spawn trigger (same tick as escorts).
+        # Death/surface "instant" rolls set diver_instant_pending; spawn_step /
+        # surface-unfreeze snap those lanes onto TRIGGER so they co-spawn with
+        # the next wave — never alone ahead of escorts.
         instant_pending = spawn_state.diver_instant_pending.astype(bool)
-        timers_ready_mask = spawn_state.spawn_timers == self.consts.DIVER_SPAWN_TIMER_TRIGGER
-        timers_or_instant = jnp.logical_or(timers_ready_mask, instant_pending)
+        timers_ready_mask = (
+            spawn_state.spawn_timers == self.consts.DIVER_SPAWN_TIMER_TRIGGER
+        )
 
         # Condition: A diver must not already exist in the lane.
         diver_exists_mask = diver_positions[:, 2] != 0  # Shape: (4,)
@@ -1487,7 +1497,7 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
 
         # Opening (no prior enemy wave): only place divers in the upper two lanes
         # even though all four are armed. Instant-pending after death/surface may
-        # still place in any armed lane (including bottom).
+        # still place in any armed lane (including bottom) on that co-spawn tick.
         is_opening = jnp.all(spawn_state.prev_sub < 0)
         opening_lane_mask = self.consts.FIRST_WAVE_DIVER_LANES.astype(bool)
         lane_place_mask = jnp.where(is_opening, opening_lane_mask, jnp.ones(4, dtype=bool))
@@ -1505,7 +1515,7 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         # --- 2. Final spawn mask: every armed lane may place on its shark tick ---
         should_spawn_mask = jnp.logical_and.reduce(
             jnp.array([
-                timers_or_instant,
+                timers_ready_mask,
                 jnp.logical_not(diver_exists_mask),
                 lanes_are_empty_mask,
                 lanes_ready_to_spawn_mask,
@@ -1549,9 +1559,11 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
             spawn_state.diver_array
         )
 
-        # Consume instant-pending once placed; drop pending if lane is no longer armed.
+        # Consume instant-pending on the reserved co-spawn tick (whether or not
+        # a diver actually placed — e.g. blocked by next-is-sub), and whenever
+        # we successfully place. Drop pending if the lane is no longer armed.
         new_pending = jnp.where(
-            should_spawn_mask,
+            jnp.logical_or(should_spawn_mask, timers_ready_mask),
             jnp.int32(0),
             spawn_state.diver_instant_pending,
         )
@@ -2773,19 +2785,35 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
             needs_oxygen = state.oxygen < 64
             should_block = jnp.logical_and(at_surface, needs_oxygen)
 
-            # Mid-game surface refill: reset spawn timers to SURFACE_FREEZE values.
+            # Mid-game surface refill: hold spawn timers at SURFACE_FREEZE values.
             # Opening oxygen fill (just_surfaced == -1) must keep counting INITIAL timers
             # so the first wave lands near ALE frame ~260 instead of ~205.
+            # After freeze: snap death/surface instant-pending lanes onto the
+            # co-spawn trigger so they place *with* escorts, not alone early.
             in_init = state.just_surfaced == -1
             should_freeze_spawns = jnp.logical_and(should_block, jnp.logical_not(in_init))
-            new_spawn_state = jax.lax.cond(
-                should_freeze_spawns,
-                lambda: state.spawn_state.replace(
+            trigger_p1 = (
+                self.consts.DIVER_SPAWN_TIMER_TRIGGER.astype(jnp.int32) + jnp.int32(1)
+            )
+
+            def _freeze_timers():
+                return state.spawn_state.replace(
                     spawn_timers=jnp.array(
                         self.consts.SURFACE_FREEZE_SPAWN_TIMERS, dtype=jnp.int32
                     )
-                ),
-                lambda: state.spawn_state,
+                )
+
+            def _snap_instant_pending():
+                ss = state.spawn_state
+                pending = ss.diver_instant_pending.astype(bool)
+                return ss.replace(
+                    spawn_timers=jnp.where(pending, trigger_p1, ss.spawn_timers)
+                )
+
+            new_spawn_state = jax.lax.cond(
+                should_freeze_spawns,
+                _freeze_timers,
+                _snap_instant_pending,
             )
 
             state_updated = state.replace(spawn_state=new_spawn_state)

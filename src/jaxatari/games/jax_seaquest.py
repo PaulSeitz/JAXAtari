@@ -231,18 +231,19 @@ class SeaquestConstants(AutoDerivedConstants):
     SCORE_OXYGEN_MAX: jnp.ndarray = struct.field(pytree_node=False, default_factory=lambda: jnp.array(90))
 
     # --- SPAWN / DIVER CADENCE ---
-    # One shared empty→spawn countdown for kill-clear AND survive-off:
-    #   reload = SPAWN_TIMER_RELOAD + DIVER_SPAWN_TIMER_TRIGGER
+    # empty→spawn countdown:
+    #   reload = SPAWN_TIMER_RELOAD(+_AFTER_SURVIVE) + DIVER_SPAWN_TIMER_TRIGGER
     #   fire escorts (+ divers on shark waves) when timer == TRIGGER.
-    # Idle wave period is (off-screen swim until DESPAWN) + SPAWN_TIMER_RELOAD
-    # + travel from ENEMY_SPAWN_X. Shortening RELOAD by ~60 and pushing DESPAWN
-    # further by the same travel budget keeps idle sync while making kill→next
-    # wave land closer to ALE.
+    # Kill-clear RELOAD tuned from seed45 policy meter (emulated frames):
+    #   Confirmed NOT shooting lag: hittable→clear TTK ALE≈31f / JAX≈33f.
+    #   ALE clear→next-hittable mean≈84 / med≈109; JAX@RELOAD=6 was ≈48 / 52.
+    #   Global kill-clear only (survive-off keeps AFTER_SURVIVE=6). Sweep:
+    #   6→~5920, 38→~4540, 44→~4360, 50→~3160, 63→~3040 (ALE seed45≈3680).
+    #   RELOAD=50 ≈ ALE farm gap without overshooting the old fast recycle.
     SPAWN_TIMER_RELOAD: jnp.ndarray = struct.field(
-        pytree_node=False, default_factory=lambda: jnp.array(6, dtype=jnp.int32)
+        pytree_node=False, default_factory=lambda: jnp.array(50, dtype=jnp.int32)
     )
-    # Mods may still override the survive-side name; keep equal to RELOAD so
-    # kill and survive stay on the same counter.
+    # Survive-off / idle lane recycle — independent of kill-clear RELOAD.
     SPAWN_TIMER_RELOAD_AFTER_SURVIVE: jnp.ndarray = struct.field(
         pytree_node=False, default_factory=lambda: jnp.array(6, dtype=jnp.int32)
     )
@@ -255,10 +256,10 @@ class SeaquestConstants(AutoDerivedConstants):
         pytree_node=False, default_factory=lambda: jnp.array(126, dtype=jnp.int32)
     )
     ENEMY_SPAWN_TIMER_RELOAD: jnp.ndarray = struct.field(
-        pytree_node=False, default_factory=lambda: jnp.array(6, dtype=jnp.int32)
+        pytree_node=False, default_factory=lambda: jnp.array(50, dtype=jnp.int32)
     )
     DIVER_WAVE_SPAWN_TIMER_RELOAD: jnp.ndarray = struct.field(
-        pytree_node=False, default_factory=lambda: jnp.array(6, dtype=jnp.int32)
+        pytree_node=False, default_factory=lambda: jnp.array(50, dtype=jnp.int32)
     )
     # Timer value at which diver+escort co-spawn. Opening timers
     # (INITIAL_SPAWN_TIMER_BASE + FIRST_WAVE_LANE_DELAY) should land the first
@@ -455,9 +456,12 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         """Reset spawn bookkeeping after a life / rescue stage reset.
 
         ``diver_array`` is the dedicated per-lane slot:
-          - death (``rearm_divers=True``): all lanes re-arm
-          - successful surface: preserve collected (0); if every lane is
-            collected/dismissed, re-arm all four; dismiss live world divers to 0
+          - death: preserve collected (0) / armed (1) / swam-off (-1). Do not
+            pass ``diver_positions`` — dismissing live divers as collected
+            would collapse remaining armed lanes into all-0 and falsely re-arm
+            the whole set (including already-bagged top lanes).
+          - successful surface: preserve collected (0); dismiss live world
+            divers to 0; if every lane is then collected, re-arm all four.
 
         Each armed lane rolls ``DIVER_INSTANT_SPAWN_PROB`` (50%) to co-spawn with
         the next escort wave. Losers get ``diver_suppress_next`` so they do not
@@ -488,13 +492,6 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
                 jnp.int32(1),
                 jnp.int32(0),
             )
-            # Death: skip two opportunities on non-instant lanes (opening wave
-            # would otherwise refill immediately).
-            suppress = jnp.where(
-                rearm_divers,
-                jnp.where(pending.astype(bool), jnp.int32(0), jnp.int32(2)),
-                suppress,
-            )
 
         prev_sub = jnp.where(
             rearm_divers,
@@ -523,11 +520,11 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
     def spawn_timer_reload(
         self, diver_array: chex.Array, *, after_survive: bool = False
     ) -> chex.Array:
-        """Shared per-lane reload after kill-clear or survive-off.
+        """Per-lane reload after kill-clear or survive-off.
 
-        Same counter either way: ``SPAWN_TIMER_RELOAD + TRIGGER`` (or the
-        survive-named override, kept equal by default). Idle spacing comes from
-        how far enemies swim past the edge before despawn, not a second clock.
+        Kill-clear uses ``SPAWN_TIMER_RELOAD + TRIGGER``; survive-off uses
+        ``SPAWN_TIMER_RELOAD_AFTER_SURVIVE + TRIGGER`` (kept short so AFK
+        spacing stays despawn/travel-driven).
         """
         trigger = self.consts.DIVER_SPAWN_TIMER_TRIGGER.astype(jnp.int32)
         reload = jnp.where(
@@ -2842,6 +2839,8 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
                 def handle_stage_reset():
                     # If the player still has lives left, perform the original stage reset.
                     # This preserves the mechanic of resetting the level after losing a life.
+                    # Keep per-lane collected bits — ALE does not re-arm bagged
+                    # diver lanes on oxygen / collision death.
                     return reset_state.replace(
                         lives=state.lives - 1,
                         score=state.score,
@@ -2849,7 +2848,6 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
                         divers_collected=jnp.maximum(state.divers_collected - 1, 0),
                         spawn_state=self.soft_reset_spawn_state(
                             state.spawn_state,
-                            rearm_divers=True,
                             rng=jax.random.fold_in(state.rng_key, state.step_counter),
                         ),
                     )
@@ -3118,14 +3116,14 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
 
             # Start death animation; dismiss world divers (ALE clears them on
             # death) so they cannot keep swimming as phantoms through the anim.
+            # Preserve diver_array collected bits — do not pass positions into
+            # soft_reset (live→0 would all-zero then re-arm already-bagged lanes).
             death_animation_state = state_updated.replace(
                 score=state.score + collision_points,
                 death_counter=jnp.array(90),
                 diver_positions=jnp.zeros_like(state_updated.diver_positions),
                 spawn_state=self.soft_reset_spawn_state(
                     state_updated.spawn_state,
-                    state_updated.diver_positions,
-                    rearm_divers=True,
                     rng=jax.random.fold_in(
                         state_updated.rng_key, state_updated.step_counter
                     ),

@@ -1673,9 +1673,14 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
             diver_positions
         )
 
-        # Update the diver_array: If a lane was marked with -1 (diver swam off-screen)
-        # and the lane is now empty, mark it as ready for a new spawn cycle (value 1).
-        spawn_next_cycle_mask = jnp.logical_and(spawn_state.diver_array == -1, lanes_are_empty_mask)
+        # Update the diver_array: swam-off (-1) re-arms when the *diver slot*
+        # is empty — not when the escort lane is empty. Continuous shark farming
+        # otherwise leaves da stuck at -1 forever; collected top lanes (0) then
+        # never see rearm_all, so divers vanish for the rest of the dive.
+        spawn_next_cycle_mask = jnp.logical_and(
+            spawn_state.diver_array == -1,
+            jnp.logical_not(diver_exists_mask),
+        )
         new_diver_array = jnp.where(
             spawn_next_cycle_mask,
             1,
@@ -2015,8 +2020,8 @@ class JaxSeaquest(JaxEnvironment[SeaquestState, SeaquestObservation, SeaquestInf
         )
 
         # Cycle complete only when every lane was *collected* (da==0). A swim-off
-        # (-1→1 when empty) must NOT re-open previously collected lanes — each
-        # lane keeps its dedicated diver dark until the full set is bagged.
+        # (-1→1 when the diver slot is empty) must NOT re-open previously
+        # collected lanes — each lane stays dark until the full set is bagged.
         rearm_all = jnp.all(final_diver_array == 0)
         reset_array = jnp.where(
             rearm_all,

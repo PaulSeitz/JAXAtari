@@ -152,11 +152,22 @@ class SeaquestEnvMod(JaxtariModController):
         if self._has_change_background:
             self._apply_change_background_color()
 
+    def _reapply_renderer_asset_mods(self) -> None:
+        """Re-run asset remaps after a renderer hot-swap (native downscaling).
+
+        ``apply_native_downscaling`` rebuilds ``BACKGROUND_FRAMES`` from stock
+        assets; without this, ``change_background_color`` silently reverts to
+        the default water blue (and grayscale 84×84 skill obs match ``base``).
+        """
+        if self._has_change_background:
+            self._apply_change_background_color()
+
     def _apply_change_background_color(self):
         """Remap baked background IDs to magenta; preserve the left black pillar.
 
         Runs after renderer init so surface-wave baking still sees the original
         water blues in ``COLOR_TO_ID`` (see ``ChangeBackgroundColorMod``).
+        Safe to call again after native-downscale renderer swaps.
         """
         import numpy as np
 

@@ -153,11 +153,19 @@ def apply_native_downscaling(
     #     Controllers (e.g. SeaquestEnvMod) may define their own @jit render()
     #     that closed over the old renderer as a compile-time constant. Walking
     #     toward core_env and clearing per-class render() forces a retrace.
+    #     Also re-apply controller asset remaps (e.g. change_background_color
+    #     mutates BACKGROUND_FRAMES once at init — a fresh bake would wipe it).
     env_layer = base_env
-    while env_layer is not core_env:
+    while env_layer is not None:
         render_fn = type(env_layer).__dict__.get('render')
         if render_fn is not None and hasattr(render_fn, 'clear_cache'):
             render_fn.clear_cache()
+        reapply = getattr(env_layer, "_reapply_renderer_asset_mods", None)
+        if callable(reapply):
+            with _suspend_jit_tripwire(core_env):
+                reapply()
+        if env_layer is core_env:
+            break
         env_layer = getattr(env_layer, '_env', None)
         if env_layer is None:
             break

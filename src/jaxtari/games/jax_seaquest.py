@@ -3288,8 +3288,10 @@ class SeaquestRenderer(JAXGameRenderer):
             self.FLIP_OFFSETS
         ) = self.jr.load_and_setup_assets(final_asset_config, sprite_path)
 
-        # Load packed surface-wave background frames (bg/1.npy + bg/2.npy).
-        # Done once at init — render only indexes.
+        # Bake surface-wave background variants from ALE screenshots (or fall back
+        # to the two packed bg frames). Done once at init — render only indexes.
+        self.SURFACE_BAND_Y0 = 45
+        self.SURFACE_BAND_Y1 = 55  # rows 45-54: alternating water blues
         # Live ALE from reset: hold frame 0 for 6 frames, then advance every 8
         # (t=0..5 → 0, t=6..13 → 1, t=14..21 → 2, ...).
         self.SURFACE_WAVE_FIRST_HOLD = 6
@@ -3299,7 +3301,7 @@ class SeaquestRenderer(JAXGameRenderer):
         # hull (two dark-blue wave lines, black waterline, one deep-blue row).
         self.SURFACE_OCCLUSION_Y0 = 53
         self.SURFACE_OCCLUSION_Y1 = 57
-        self.BACKGROUND_FRAMES = self._load_surface_wave_backgrounds(sprite_path)
+        self.BACKGROUND_FRAMES = self._bake_surface_wave_backgrounds(sprite_path)
         # Keep BACKGROUND / BACKGROUND_ALT aliases for mods that still reference them.
         self.BACKGROUND = self.BACKGROUND_FRAMES[0]
         alt_i = 1 if self.BACKGROUND_FRAMES.shape[0] > 1 else 0
@@ -3315,20 +3317,91 @@ class SeaquestRenderer(JAXGameRenderer):
 
         self.SHARK_COLOR_MAP = self._precompute_shark_color_map()
 
-    def _load_surface_wave_backgrounds(self, sprite_path: str) -> jnp.ndarray:
-        """Stack packed background color-ID rasters for surface-wave flicker.
+    @staticmethod
+    def _find_seaquest_screenshot_dir() -> str | None:
+        """Locate Seaquest_screenshots (repo root or scripts/)."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.abspath(os.path.join(here, "..", "..", ".."))
+        candidates = [
+            os.path.join(repo_root, "Seaquest_screenshots"),
+            os.path.join(repo_root, "scripts", "Seaquest_screenshots"),
+            os.path.join(os.getcwd(), "Seaquest_screenshots"),
+            os.path.join(os.getcwd(), "scripts", "Seaquest_screenshots"),
+        ]
+        for path in candidates:
+            if os.path.isdir(path) and any(
+                name.startswith("frame_") and name.endswith(".npy")
+                for name in os.listdir(path)
+            ):
+                return path
+        return None
 
-        Uses the base background from asset loading (``bg/1.npy``) plus an
-        optional second packed frame at ``bg/2.npy``.
+    @staticmethod
+    def _majority_water_color(row_rgb: np.ndarray) -> tuple[int, int, int]:
+        """Pick the dominant Seaquest water blue on a row, ignoring sprites/black."""
+        dark = (0, 28, 136)
+        light = (24, 59, 157)
+        flat = row_rgb.reshape(-1, 3)
+        n_dark = int(np.sum(np.all(flat == dark, axis=1)))
+        n_light = int(np.sum(np.all(flat == light, axis=1)))
+        if n_dark == 0 and n_light == 0:
+            return dark
+        return light if n_light >= n_dark else dark
+
+    def _bake_surface_wave_backgrounds(self, sprite_path: str) -> jnp.ndarray:
+        """Build a stack of background color-ID rasters with surface-band variants.
+
+        Reads ALE frames from Seaquest_screenshots, strips objects by taking the
+        majority water-blue per row for y in [45, 55), and paints those colors
+        onto copies of the base background (left black pillar preserved). Falls
+        back to packed bg/1.npy + bg/2.npy when no screenshots are present.
         """
-        frames = [np.asarray(self.BACKGROUND)]
-        bg2_path = os.path.join(sprite_path, "bg", "2.npy")
-        if os.path.exists(bg2_path):
-            bg2_rgba = self.jr.loadFrame(bg2_path)
-            frames.append(
-                np.asarray(self.jr._create_background_raster(bg2_rgba, self.COLOR_TO_ID))
+        base = np.asarray(self.BACKGROUND)
+        dark = (0, 28, 136)
+        light = (24, 59, 157)
+        dark_id = self.COLOR_TO_ID.get(dark)
+        light_id = self.COLOR_TO_ID.get(light)
+        black_id = self.COLOR_TO_ID.get((0, 0, 0), 0)
+        y0, y1 = self.SURFACE_BAND_Y0, self.SURFACE_BAND_Y1
+
+        def paint_band(bg: np.ndarray, row_colors: list) -> np.ndarray:
+            out = bg.copy()
+            for y, rgb in zip(range(y0, y1), row_colors):
+                cid = light_id if tuple(rgb) == light else dark_id
+                if cid is None:
+                    continue
+                row = out[y]
+                out[y] = np.where(row != black_id, cid, row)
+            return out
+
+        shot_dir = self._find_seaquest_screenshot_dir()
+        baked = []
+        if shot_dir is not None and dark_id is not None and light_id is not None:
+            frame_paths = sorted(
+                os.path.join(shot_dir, name)
+                for name in os.listdir(shot_dir)
+                if name.startswith("frame_") and name.endswith(".npy")
             )
-        return jnp.asarray(np.stack(frames, axis=0))
+            for path in frame_paths:
+                rgb = np.load(path)
+                if rgb.ndim == 3 and rgb.shape[-1] == 4:
+                    rgb = rgb[..., :3]
+                row_colors = [
+                    self._majority_water_color(rgb[y]) for y in range(y0, y1)
+                ]
+                baked.append(paint_band(base, row_colors))
+
+        if not baked:
+            # Fallback: packed two-frame flicker from main sprites.
+            baked = [base]
+            bg2_path = os.path.join(sprite_path, "bg", "2.npy")
+            if os.path.exists(bg2_path):
+                bg2_rgba = self.jr.loadFrame(bg2_path)
+                baked.append(
+                    np.asarray(self.jr._create_background_raster(bg2_rgba, self.COLOR_TO_ID))
+                )
+
+        return jnp.asarray(np.stack(baked, axis=0))
 
     def _create_procedural_sprites(self) -> dict:
         """Creates 1x1 pixel sprites to ensure colors are in the palette."""
@@ -3418,8 +3491,8 @@ class SeaquestRenderer(JAXGameRenderer):
         )
 
         # Re-blit the 4 waterline occlusion rows (53-56) so the player hull is
-        # partially covered while the conning tower (46-52) stays visible.
-        # Colors come from the active packed bg frame (wave flicker).
+        # partially covered while the conning tower (46-52) stays visible — matches
+        # ALE surface screenshots. Colors come from the active bg frame (wave flicker).
         y0 = self.SURFACE_OCCLUSION_Y0
         y1 = self.SURFACE_OCCLUSION_Y1
         surface_strip = self.BACKGROUND_FRAMES[bg_idx, y0:y1, :]

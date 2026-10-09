@@ -6,7 +6,11 @@ from jaxtari.games.mods.spaceinvaders.spaceinvaders_mod_plugins import (
     DisableShieldRightMod,
     ShiftShieldsMod,
     ControllableMissileMod,
-    NoDangerMod
+    NoDangerMod,
+    ShiftFormationMod,
+    SlowTankMod,
+    FasterAliensMod,
+    SaucerOnlyMod,
 )
 
 class SpaceInvadersEnvMod(JaxtariModController):    
@@ -21,6 +25,10 @@ class SpaceInvadersEnvMod(JaxtariModController):
         "shift_shields": ShiftShieldsMod,
         "controllable_missile": ControllableMissileMod,
         "no_danger": NoDangerMod,
+        "shift_formation": ShiftFormationMod,
+        "slow_tank": SlowTankMod,
+        "faster_aliens": FasterAliensMod,
+        "saucer_only": SaucerOnlyMod,
     }
 
     def __init__(self,

@@ -67,6 +67,7 @@ GAME_MODULES = {
     "riverraid": "jaxtari.games.jax_riverraid",
     "roadrunner": "jaxtari.games.jax_roadrunner",
     "seaquest": "jaxtari.games.jax_seaquest",
+    "old_seaquest": "jaxtari.games.jax_old_seaquest",
     "sirlancelot": "jaxtari.games.jax_sirlancelot",
     "skiing": "jaxtari.games.jax_skiing",
     "slotmachine": "jaxtari.games.jax_slotmachine",
@@ -116,6 +117,8 @@ MOD_MODULES = {
     "freeway": "jaxtari.games.mods.freeway_mods.FreewayEnvMod",
     "breakout": "jaxtari.games.mods.breakout_mods.BreakoutEnvMod",
     "seaquest": "jaxtari.games.mods.seaquest_mods.SeaquestEnvMod",
+    # Same robustness mods as seaquest (spawn cadence differs in the base env only).
+    "old_seaquest": "jaxtari.games.mods.seaquest_mods.SeaquestEnvMod",
     "videochess": "jaxtari.games.mods.videochess_mods.VideochessEnvMod",
     "videopinball": "jaxtari.games.mods.videopinball_mods.VideoPinballEnvMod",
     "tennis": "jaxtari.games.mods.tennis_mods.TennisEnvMod",
@@ -152,6 +155,8 @@ MOD_MODULES = {
     "boxing": "jaxtari.games.mods.boxing_mods.BoxingEnvMod",
     "amidar": "jaxtari.games.mods.amidar_mods.AmidarEnvMod",
     "timepilot": "jaxtari.games.mods.timepilot_mods.TimePilotEnvMod",
+    "asterix": "jaxtari.games.mods.asterix_mods.AsterixEnvMod",
+    "namethisgame": "jaxtari.games.mods.namethisgame_mods.NameThisGameEnvMod",
 }
 
 

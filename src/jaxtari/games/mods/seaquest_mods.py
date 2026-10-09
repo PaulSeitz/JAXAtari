@@ -3,7 +3,56 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 from jaxtari.modification import JaxtariModController
-from jaxtari.games.mods.seaquest.seaquest_mod_plugins import DisableEnemiesMod, NoDiversMod, EnemyMinesMod, FireBallsMod, UnlimitedOxygenMod, GravityMod, RandomColorEnemiesMod, PenalizeDiverShootingMod
+from jaxtari.games.mods.seaquest.seaquest_mod_plugins import (
+    DisableEnemiesMod,
+    NoDiversMod,
+    EnemyMinesMod,
+    FireBallsMod,
+    ChangeBackgroundColorMod,
+    GrayscaleMod,
+    InvertedColorsMod,
+    UnlimitedOxygenMod,
+    GravityMod,
+    RandomColorEnemiesMod,
+    PeacefulEnemiesMod,
+    NoEnemyTorpedoesMod,
+    FasterEnemiesMod,
+    SlowerEnemiesMod,
+    ShiftLanesMod,
+    OnlySubmarinesMod,
+    OnlySharksMod,
+    VerticalOscillationMod,
+    DenseSpawnsMod,
+    FastOxygenDrainMod,
+    SlowOxygenDrainMod,
+    SurfaceSubAlwaysMod,
+    InvertedLanesMod,
+    LethalDiversMod,
+    NoEnemiesMod,
+    PenalizeDiverShootingMod,
+    ShootableDiversMod,
+    PeacefulSharksOnlyMod,
+    CollectSharksOnContactMod,
+    DisableDiverCollectMod,
+    SwapDiverEnemyLabelsMod,
+    ExtraEnemyTypeMod,
+    NoSurfacingDeathMod,
+    MirrorDiversMod,
+    MirrorWorldMod,
+    InvertedControlsMod,
+    MomentumMod,
+    SparseWorldMod,
+    TinyDiversMod,
+    DynamicLaneDriftMod,
+    ContinuousRandomSpawnsMod,
+    OceanCurrentsMod,
+    ErraticEnemiesMod,
+    MicroSwarmMod,
+    StickyWaterMod,
+    GhostSharksMod,
+    SlipperyTurnMod,
+    LaneScrambleMod,
+)
 
 class SeaquestEnvMod(JaxtariModController):
     """
@@ -13,17 +62,73 @@ class SeaquestEnvMod(JaxtariModController):
 
     REGISTRY = {
         "disable_enemies": DisableEnemiesMod,
+        "no_enemies": NoEnemiesMod,
         "no_divers": NoDiversMod,
-        "fireballs": FireBallsMod,
-        # "peaceful_enemies": PeacefulEnemiesMod,
-        # "lethal_divers": LethalDiversMod,
+        "peaceful_enemies": PeacefulEnemiesMod,
+        "lethal_divers": LethalDiversMod,
         "unlimited_oxygen": UnlimitedOxygenMod,
         "gravity": GravityMod,
         "random_color_enemies": RandomColorEnemiesMod,
-        "penalize_diver_shooting": PenalizeDiverShootingMod,
-        # "polluted_water": PollutedWaterMod,
         "mines": EnemyMinesMod,
-        # "fireball": ReplaceTorpedoWithFireBallMod
+        "fireballs": FireBallsMod,
+        "change_background_color": ChangeBackgroundColorMod,
+        "grayscale": GrayscaleMod,
+        "inverted_colors": InvertedColorsMod,
+        "no_enemy_torpedoes": NoEnemyTorpedoesMod,
+        "faster_enemies": FasterEnemiesMod,
+        "slower_enemies": SlowerEnemiesMod,
+        "shift_lanes": ShiftLanesMod,
+        "only_submarines": OnlySubmarinesMod,
+        "only_sharks": OnlySharksMod,
+        "vertical_oscillation": VerticalOscillationMod,
+        "dense_spawns": DenseSpawnsMod,
+        "fast_oxygen_drain": FastOxygenDrainMod,
+        "slow_oxygen_drain": SlowOxygenDrainMod,
+        "surface_sub_always": SurfaceSubAlwaysMod,
+        "inverted_lanes": InvertedLanesMod,
+        # Planned paper_eval additions
+        "_peaceful_sharks": PeacefulSharksOnlyMod,
+        "_collect_sharks": CollectSharksOnContactMod,
+        "_disable_diver_collect": DisableDiverCollectMod,
+        "_shootable_divers": ShootableDiversMod,
+        "collectable_sharks": ["_peaceful_sharks", "_collect_sharks"],
+        # True E2 role swap: sharks collectable + peaceful; divers lethal,
+        # uncollectable, and shootable (stock missiles ignore divers).
+        # Pair with CBL SEAQUEST_SWAP_DIVER_SHARK_ROLES (paper_eval relabel) so
+        # COLLECT↔DESTROY follow the new physics. Distinct from sprite/OC-only
+        # ``swap_diver_enemy_labels``.
+        "swap_diver_shark_roles": [
+            "_peaceful_sharks",
+            "_collect_sharks",
+            "_disable_diver_collect",
+            "_shootable_divers",
+            "lethal_divers",
+        ],
+        "shootable_divers": ShootableDiversMod,
+        "swap_diver_enemy_labels": SwapDiverEnemyLabelsMod,
+        "extra_enemy_type": ExtraEnemyTypeMod,
+        "new_pattern": ExtraEnemyTypeMod,  # alias
+        "penalize_diver_shooting": PenalizeDiverShootingMod,
+        "no_surfacing_death": NoSurfacingDeathMod,
+        # Paper-eval grid (MODS_PLAN §5)
+        "mirror_divers": MirrorDiversMod,
+        "mirror_world": MirrorWorldMod,
+        "inverted_controls": InvertedControlsMod,
+        "momentum": MomentumMod,
+        "sparse_world": SparseWorldMod,
+        "tiny_divers": TinyDiversMod,
+        # Extra layout / kinematics / object-set probes
+        "dynamic_lane_drift": DynamicLaneDriftMod,
+        "continuous_random_spawns": ContinuousRandomSpawnsMod,
+        "random_spawns": ContinuousRandomSpawnsMod,  # alias — paper showcase name
+        "ocean_currents": OceanCurrentsMod,
+        "erratic_enemies": ErraticEnemiesMod,
+        "micro_swarm": MicroSwarmMod,
+        # High-leverage extras
+        "sticky_water": StickyWaterMod,
+        "ghost_sharks": GhostSharksMod,
+        "slippery_turn": SlipperyTurnMod,
+        "lane_scramble": LaneScrambleMod,
     }
 
     _mod_sprite_dir = os.path.join(os.path.dirname(__file__), "seaquest", "sprites")
@@ -34,12 +139,45 @@ class SeaquestEnvMod(JaxtariModController):
                  allow_conflicts: bool = False
                  ):
         self._has_random_color = "random_color_enemies" in mods_config
+        self._has_mirror_world = "mirror_world" in mods_config
+        self._has_grayscale = "grayscale" in mods_config
+        self._has_inverted_colors = "inverted_colors" in mods_config
+        self._has_change_background = "change_background_color" in mods_config
         super().__init__(
             env=env,
             mods_config=mods_config,
             allow_conflicts=allow_conflicts,
             registry=self.REGISTRY
         )
+        if self._has_change_background:
+            self._apply_change_background_color()
+
+    def _apply_change_background_color(self):
+        """Remap baked background IDs to magenta; preserve the left black pillar.
+
+        Runs after renderer init so surface-wave baking still sees the original
+        water blues in ``COLOR_TO_ID`` (see ``ChangeBackgroundColorMod``).
+        """
+        import numpy as np
+
+        renderer = self._env.renderer
+        new_rgb = tuple(ChangeBackgroundColorMod._NEW_BG)
+        if new_rgb not in renderer.COLOR_TO_ID:
+            raise KeyError(
+                f"change_background_color: palette missing swatch {new_rgb}; "
+                "ChangeBackgroundColorMod.asset_overrides must seed it."
+            )
+        new_id = int(renderer.COLOR_TO_ID[new_rgb])
+        black_id = renderer.COLOR_TO_ID.get((0, 0, 0))
+        frames = np.asarray(renderer.BACKGROUND_FRAMES)
+        if black_id is None:
+            frames = np.full_like(frames, new_id)
+        else:
+            frames = np.where(frames != int(black_id), new_id, frames)
+        renderer.BACKGROUND_FRAMES = jnp.asarray(frames)
+        renderer.BACKGROUND = renderer.BACKGROUND_FRAMES[0]
+        alt_i = 1 if renderer.BACKGROUND_FRAMES.shape[0] > 1 else 0
+        renderer.BACKGROUND_ALT = renderer.BACKGROUND_FRAMES[alt_i]
 
     @partial(jax.jit, static_argnames=['self'])
     def render(self, state):
@@ -100,7 +238,7 @@ class SeaquestEnvMod(JaxtariModController):
                 0,
                 state.divers_collected
             )
-            raster = jr.render_indicator(raster, 49, 178, visible_divers, renderer.SHAPE_MASKS['diver_indicator'], spacing=10, max_value=6)
+            raster = jr.render_indicator(raster, 58, 178, visible_divers, renderer.SHAPE_MASKS['diver_indicator'], spacing=8, max_value=6)
 
             raster = jr.render_bar(raster, 49, 170, state.oxygen, 64, 63, 5, renderer.OXYGEN_COLOR_ID, renderer.OXYGEN_BAR_BG_COLOR_ID)
 
@@ -111,6 +249,23 @@ class SeaquestEnvMod(JaxtariModController):
                 color_id=renderer.BACKGROUND[0, 0]
             )
             
-            return jr.render_from_palette(raster, renderer.PALETTE)
+            img = jr.render_from_palette(raster, renderer.PALETTE)
+        else:
+            img = self._env.render(state)
 
-        return self._env.render(state)
+        if self._has_mirror_world:
+            img = img[:, ::-1]
+        if self._has_inverted_colors:
+            # Keep alpha (if present) untouched; Seaquest frames are usually RGB.
+            if img.shape[-1] == 4:
+                img = img.at[..., :3].set(255 - img[..., :3])
+            else:
+                img = 255 - img
+        if self._has_grayscale:
+            if img.shape[-1] >= 3:
+                r = img[..., 0].astype(jnp.float32)
+                g = img[..., 1].astype(jnp.float32)
+                b = img[..., 2].astype(jnp.float32)
+                gray = (0.299 * r + 0.587 * g + 0.114 * b).astype(img.dtype)
+                img = img.at[..., 0].set(gray).at[..., 1].set(gray).at[..., 2].set(gray)
+        return img

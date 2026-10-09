@@ -1,0 +1,23 @@
+# Standalone video generation for a saved evo policy.
+#
+# Run:
+#   cd scripts/benchmarks
+#   PYTHONPATH=../../src python evo_video.py --config-name montezuma \
+#     PARAMS_PATH=./models/evo/montezumarevenge/<run>/pgpe_montezumarevenge_seed42.safetensors
+
+defaults:
+  - evo_base
+  - _self_
+
+ENV_NAME: "montezumarevenge"
+CLIP_REWARD: false
+MAX_FRAMES_PER_EPISODE: 108000
+
+PARAMS_PATH: null
+VIDEO_LABEL: "eval"
+VIDEO_SEED_IDX: 0
+VIDEO_STEP: null
+VIDEO_SAVE_PATH: null
+
+RECORD_FINAL_VIDEO: false
+SAVE_PATH: null

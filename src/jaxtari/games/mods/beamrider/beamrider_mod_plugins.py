@@ -3,7 +3,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from jaxtari.modification import JaxtariInternalModPlugin
+from jaxtari.modification import JaxtariInternalModPlugin, JaxtariPostStepModPlugin
 from jaxtari.games.jax_beamrider import (
     BLUE_LINE_INIT_TABLE,
     LaneBlockerState,
@@ -472,56 +472,21 @@ def _triangle_wave(values, period):
     return jnp.abs(phase - half_period)
 
 
-def _resolve_render_color_id(renderer, rgb):
-    """Return a palette ID for rgb.
-
-    Exact RGB keys can disappear from COLOR_TO_ID after native downscaling
-    rebuilds the palette from filtered sprites. Fall back to the nearest
-    remaining color (host-side lookup; safe to call under jax.jit tracing).
-    """
-    color_to_id = renderer.COLOR_TO_ID
-    if rgb in color_to_id:
-        return color_to_id[rgb]
-    rgba = (*rgb, 255)
-    if rgba in color_to_id:
-        return color_to_id[rgba]
-
-    best_id = 0
-    best_dist = None
-    for color, color_id in color_to_id.items():
-        if len(color) < 3:
-            continue
-        dist = (
-            (int(color[0]) - rgb[0]) ** 2
-            + (int(color[1]) - rgb[1]) ** 2
-            + (int(color[2]) - rgb[2]) ** 2
-        )
-        if best_dist is None or dist < best_dist:
-            best_dist = dist
-            best_id = color_id
-    return best_id
-
-
 def _apply_fog_of_war(renderer, raster, state):
-    hs = float(renderer.config.height_scaling)
-    ws = float(renderer.config.width_scaling)
     fog_top = _get_fog_of_war_top_y(state, renderer.consts)
     fog_cutoff = _get_fog_of_war_cutoff_y(fog_top, renderer.consts)
-    # Game logic stays at native resolution; scale into the (possibly downscaled) raster.
-    fog_top = jnp.round(fog_top.astype(jnp.float32) * hs).astype(jnp.int32)
-    fog_cutoff = jnp.round(fog_cutoff.astype(jnp.float32) * hs).astype(jnp.int32)
     fog_height = jnp.maximum(fog_cutoff - fog_top, 1)
-    fog_left = jnp.array(int(round(8 * ws)), dtype=jnp.int32)
+    fog_left = jnp.array(8, dtype=jnp.int32)
     fog_right = fog_left + jnp.array(renderer.SHAPE_MASKS["blue_line"].shape[1], dtype=jnp.int32)
     xx = renderer.jr._xx
     yy = renderer.jr._yy
     rel_y = jnp.clip(yy - fog_top, 0, fog_height)
     in_fog_band = (yy >= fog_top) & (yy < fog_cutoff) & (xx >= fog_left) & (xx < fog_right)
 
-    black_id = jnp.array(_resolve_render_color_id(renderer, (0, 0, 0)), dtype=raster.dtype)
-    shadow_id = jnp.array(_resolve_render_color_id(renderer, (80, 0, 132)), dtype=raster.dtype)
-    body_id = jnp.array(_resolve_render_color_id(renderer, (104, 25, 154)), dtype=raster.dtype)
-    edge_id = jnp.array(_resolve_render_color_id(renderer, (45, 109, 152)), dtype=raster.dtype)
+    black_id = jnp.array(renderer.COLOR_TO_ID[(0, 0, 0)], dtype=raster.dtype)
+    shadow_id = jnp.array(renderer.COLOR_TO_ID[(80, 0, 132)], dtype=raster.dtype)
+    body_id = jnp.array(renderer.COLOR_TO_ID[(104, 25, 154)], dtype=raster.dtype)
+    edge_id = jnp.array(renderer.COLOR_TO_ID[(45, 109, 152)], dtype=raster.dtype)
 
     local_x = xx - fog_left
     phase_fast = state.steps // 16
@@ -1576,17 +1541,7 @@ class DoubleEnemySpeedMod(JaxtariInternalModPlugin):
         )
 
     @partial(jax.jit, static_argnums=(0,))
-    def _white_ufo_normal(
-        self,
-        white_ufo_pos,
-        white_ufo_vel_x,
-        white_ufo_vel_y,
-        pattern_id,
-        pattern_timer,
-        already_left,
-        occupied_lanes=None,
-        edge_phase=False,
-    ):
+    def _white_ufo_normal(self, white_ufo_pos, white_ufo_vel_x, white_ufo_vel_y, pattern_id, already_left):
         env = self._env
         speed_factor = env.consts.WHITE_UFO_SPEED_FACTOR
         retreat_mult = env.consts.WHITE_UFO_RETREAT_SPEED_MULT
@@ -1671,7 +1626,6 @@ class DoubleEnemySpeedMod(JaxtariInternalModPlugin):
     def _white_ufo_step(
         self,
         sector,
-        white_ufo_left,
         white_ufo_position,
         white_ufo_vel,
         time_on_lane,
@@ -1681,7 +1635,6 @@ class DoubleEnemySpeedMod(JaxtariInternalModPlugin):
         pattern_id,
         pattern_timer,
         key,
-        occupied_lanes=None,
     ):
         env = self._env
         white_ufo_vel_x = white_ufo_vel[0]
@@ -1691,21 +1644,16 @@ class DoubleEnemySpeedMod(JaxtariInternalModPlugin):
         is_offscreen = jnp.all(white_ufo_position == offscreen_pos)
 
         new_key, key_motion_1, key_motion_2, choice_key1, choice_key2, float_key = jax.random.split(key, 6)
-        float_rolls = jax.random.uniform(float_key, shape=(5,))
+        float_rolls = jax.random.uniform(float_key, shape=(4,))
 
         spawn_delay_roll = float_rolls[0]
         retreat_roll = float_rolls[2]
         start_roll = float_rolls[3]
-        flythrough_roll = float_rolls[4]
 
         spawn_delay = jnp.maximum(spawn_delay - 1, 0)
-        can_shoot = white_ufo_left <= env.consts.WHITE_UFO_SHOOT_UNLOCK_LEFT
-        if occupied_lanes is None:
-            occupied_lanes = jnp.zeros(7, dtype=bool)
 
         pattern_id, pattern_timer, time_on_lane, attack_time = env._white_ufo_update_pattern_state(
             sector,
-            white_ufo_left,
             white_ufo_position,
             time_on_lane,
             attack_time,
@@ -1715,11 +1663,8 @@ class DoubleEnemySpeedMod(JaxtariInternalModPlugin):
             pattern_timer,
             retreat_roll,
             start_roll,
-            flythrough_roll,
-            can_shoot,
             choice_key1,
             choice_key2,
-            occupied_lanes=occupied_lanes,
         )
 
         requires_lane_motion = env._white_ufo_pattern_requires_lane_motion(pattern_id)
@@ -2162,7 +2107,6 @@ class ThreeLanesMod(JaxtariInternalModPlugin):
     def _white_ufo_update_pattern_state(
         self,
         sector,
-        white_ufo_left,
         position,
         time_on_lane,
         attack_time,
@@ -2172,13 +2116,9 @@ class ThreeLanesMod(JaxtariInternalModPlugin):
         pattern_timer,
         retreat_roll,
         start_roll,
-        flythrough_roll,
-        can_shoot,
         key_chain_choice,
-        key_start_choice,
-        occupied_lanes=None,
+        key_start_choice
     ):
-        _ = (white_ufo_left, flythrough_roll, can_shoot, occupied_lanes)  # signature compat with base env
         on_top_lane = position[1] <= self._env.consts.TOP_CLIP
         time_on_lane = jnp.where(on_top_lane, time_on_lane + 1, 0)
         attack_time = jnp.where(on_top_lane, 0, attack_time)
@@ -2199,10 +2139,10 @@ class ThreeLanesMod(JaxtariInternalModPlugin):
         shoot_now = (pattern_timer >> 7) & 1
 
         def update_triple(_):
-            can_fire = (shots_left > 0) & is_on_lane & (closest_lane_id != last_lane)
-            new_shoot_now = jnp.where(shoot_now == 1, 0, jnp.where(can_fire, 1, 0))
-            new_shots_left = jnp.where(can_fire, shots_left - 1, shots_left)
-            new_last_lane = jnp.where(can_fire, closest_lane_id, last_lane)
+            can_shoot = (shots_left > 0) & is_on_lane & (closest_lane_id != last_lane)
+            new_shoot_now = jnp.where(shoot_now == 1, 0, jnp.where(can_shoot, 1, 0))
+            new_shots_left = jnp.where(can_shoot, shots_left - 1, shots_left)
+            new_last_lane = jnp.where(can_shoot, closest_lane_id, last_lane)
             return (new_shoot_now << 7) | (new_last_lane << 3) | new_shots_left
 
         pattern_timer = jnp.where(
@@ -2320,18 +2260,7 @@ class ThreeLanesMod(JaxtariInternalModPlugin):
         return vx, 0.0
 
     @partial(jax.jit, static_argnums=(0,))
-    def _white_ufo_normal(
-        self,
-        white_ufo_pos,
-        white_ufo_vel_x,
-        white_ufo_vel_y,
-        pattern_id,
-        pattern_timer,
-        already_left,
-        occupied_lanes=None,
-        edge_phase=False,
-    ):
-        _ = (pattern_timer, already_left, occupied_lanes, edge_phase)  # signature compat with base env
+    def _white_ufo_normal(self, white_ufo_pos, white_ufo_vel_x, white_ufo_vel_y, pattern_id, already_left):
         speed_factor = self._env.consts.WHITE_UFO_SPEED_FACTOR
         retreat_mult = self._env.consts.WHITE_UFO_RETREAT_SPEED_MULT
         x, y = white_ufo_pos[0], white_ufo_pos[1]
@@ -3309,8 +3238,37 @@ class MothershipLaserMod(JaxtariInternalModPlugin):
 class TeleportUFOsMod(JaxtariInternalModPlugin):
     """Adds a rare White-UFO pattern that snaps once to a nearby lane."""
 
-    # Use the base env's scan-based _advance_white_ufos (lane occupancy aware).
-    # Patched _white_ufo_step below is picked up via self._white_ufo_step.
+    def _advance_white_ufos(self, state):
+        # Beamrider caches a vmapped White-UFO step function at env init time.
+        # Rebuild it here so this mod uses the patched _white_ufo_step logic.
+        results = jax.vmap(
+            self._white_ufo_step,
+            in_axes=(None, 1, 1, 0, 0, 0, 0, 0, 0, 0),
+        )(
+            state.sector,
+            state.level.white_ufo_pos,
+            state.level.white_ufo_vel,
+            state.level.white_ufo_time_on_lane,
+            state.level.white_ufo_attack_time,
+            state.level.white_ufo_already_left,
+            state.level.white_ufo_spawn_delay,
+            state.level.white_ufo_pattern_id,
+            state.level.white_ufo_pattern_timer,
+            state.level.white_ufo_rngs,
+        )
+
+        positions, vel_x, vel_y, time_on_lane, attack_time, already_left, spawn_delay, pattern_id, pattern_timer, new_keys = results
+        return WhiteUFOUpdate(
+            pos=positions.T,
+            vel=jnp.stack([vel_x, vel_y]),
+            time_on_lane=time_on_lane,
+            attack_time=attack_time,
+            already_left=already_left,
+            spawn_delay=spawn_delay,
+            pattern_id=pattern_id.astype(jnp.int32),
+            pattern_timer=pattern_timer.astype(jnp.int32),
+            rngs=new_keys,
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def _white_ufo_pattern_requires_lane_motion(self, pattern_id):
@@ -3395,7 +3353,6 @@ class TeleportUFOsMod(JaxtariInternalModPlugin):
     def _white_ufo_update_pattern_state(
         self,
         sector,
-        white_ufo_left,
         position,
         time_on_lane,
         attack_time,
@@ -3405,13 +3362,9 @@ class TeleportUFOsMod(JaxtariInternalModPlugin):
         pattern_timer,
         retreat_roll,
         start_roll,
-        flythrough_roll,
-        can_shoot,
         key_chain_choice,
-        key_start_choice,
-        occupied_lanes=None,
+        key_start_choice
     ):
-        _ = (white_ufo_left, flythrough_roll, can_shoot, occupied_lanes)  # signature compat with base env
         on_top_lane = position[1] <= self._env.consts.TOP_CLIP
         time_on_lane = jnp.where(on_top_lane, time_on_lane + 1, 0)
         attack_time = jnp.where(on_top_lane, 0, attack_time)
@@ -3542,7 +3495,6 @@ class TeleportUFOsMod(JaxtariInternalModPlugin):
     def _white_ufo_step(
         self,
         sector,
-        white_ufo_left,
         white_ufo_position,
         white_ufo_vel,
         time_on_lane,
@@ -3552,7 +3504,6 @@ class TeleportUFOsMod(JaxtariInternalModPlugin):
         pattern_id,
         pattern_timer,
         key,
-        occupied_lanes=None,
     ):
         white_ufo_vel_x = white_ufo_vel[0]
         white_ufo_vel_y = white_ufo_vel[1]
@@ -3561,23 +3512,17 @@ class TeleportUFOsMod(JaxtariInternalModPlugin):
         is_offscreen = jnp.all(white_ufo_position == offscreen_pos)
 
         new_key, key_motion, key_chain_choice, key_start_choice, float_key = jax.random.split(key, 5)
-        float_rolls = jax.random.uniform(float_key, shape=(5,))
+        float_rolls = jax.random.uniform(float_key, shape=(4,))
 
         spawn_delay_roll = float_rolls[0]
         motion_roll = float_rolls[1]
         retreat_roll = float_rolls[2]
         start_roll = float_rolls[3]
-        flythrough_roll = float_rolls[4]
 
         spawn_delay = jnp.maximum(spawn_delay - 1, 0)
-        can_shoot = white_ufo_left <= self._env.consts.WHITE_UFO_SHOOT_UNLOCK_LEFT
-        edge_phase = white_ufo_left <= self._env.consts.WHITE_UFO_OUTER_EDGE_UNLOCK_LEFT
-        if occupied_lanes is None:
-            occupied_lanes = jnp.zeros(7, dtype=bool)
 
         pattern_id, pattern_timer, time_on_lane, attack_time = self._white_ufo_update_pattern_state(
             sector,
-            white_ufo_left,
             white_ufo_position,
             time_on_lane,
             attack_time,
@@ -3587,11 +3532,8 @@ class TeleportUFOsMod(JaxtariInternalModPlugin):
             pattern_timer,
             retreat_roll,
             start_roll,
-            flythrough_roll,
-            can_shoot,
             key_chain_choice,
-            key_start_choice,
-            occupied_lanes=occupied_lanes,
+            key_start_choice
         )
 
         ufo_x = white_ufo_position[0].astype(jnp.float32)
@@ -3631,16 +3573,7 @@ class TeleportUFOsMod(JaxtariInternalModPlugin):
         already_left = already_left | jnp.logical_not(on_top_lane)
 
         def follow_lane(_):
-            return self._env._white_ufo_normal(
-                white_ufo_position,
-                white_ufo_vel_x,
-                white_ufo_vel_y,
-                pattern_id,
-                pattern_timer,
-                already_left,
-                occupied_lanes=occupied_lanes,
-                edge_phase=edge_phase,
-            )
+            return self._env._white_ufo_normal(white_ufo_position, white_ufo_vel_x, white_ufo_vel_y, pattern_id, already_left)
 
         def stay_on_top(_):
             return self._env._white_ufo_top_lane(white_ufo_position, white_ufo_vel_x, pattern_id, motion_roll)
@@ -3688,3 +3621,115 @@ class TeleportUFOsMod(JaxtariInternalModPlugin):
             pattern_timer,
             new_key,
         )
+
+
+
+class SlowStrafeMod(JaxtariInternalModPlugin):
+    """D_p: slower player lane strafe."""
+
+    name = "slow_strafe"
+    constants_overrides = {
+        "PLAYER_SPEED": 1.0,
+    }
+
+
+class TopIdleNoShootMod(JaxtariPostStepModPlugin):
+    """A: one idle UFO at laser range on a random *playable* lane; no shots.
+
+    Registry key ``idle_at_range`` (alias ``top_idle_no_shoot``).
+    Lanes 0 and 6 (far L/R) are unreachable — only inner lanes 1–5.
+
+    Lane id is stored in ``white_ufo_pattern_timer[0]``. The base game rewrites
+    that field every step, so we always read the lane from *prev_state* (our
+    last post-step write), never from ``new_state``.
+    """
+
+    name = "idle_at_range"
+
+    def _place(self, lane, dtype=jnp.float32):
+        env = self._env
+        off = jnp.array(env.consts.ENEMY_OFFSCREEN_POS, dtype=dtype)
+        shootable_y = jnp.float32(env.consts.MAX_LASER_Y) + jnp.float32(8.0)
+        top_clip = jnp.float32(env.consts.TOP_CLIP)
+        x = env.top_lanes_x[lane] + env.lane_dx_over_dy[lane] * (shootable_y - top_clip)
+        slot0 = jnp.array([x, shootable_y], dtype=dtype)
+        return jnp.stack([slot0, off, off], axis=1), shootable_y
+
+    @partial(jax.jit, static_argnums=(0,))
+    def after_reset(self, obs, state):
+        env = self._env
+        playable = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+        keys = state.level.white_ufo_rngs
+        k0, k_lane = jax.random.split(keys[0])
+        lane = playable[jax.random.randint(k_lane, (), 0, playable.shape[0])]
+        new_pos, _ = self._place(lane)
+        bullet_off = jnp.array(env.consts.BULLET_OFFSCREEN_POS, dtype=jnp.float32)
+        n_shots = state.level.enemy_shot_pos.shape[1]
+        level = state.level.replace(
+            white_ufo_pos=new_pos,
+            white_ufo_vel=jnp.zeros_like(state.level.white_ufo_vel),
+            white_ufo_attack_time=jnp.zeros_like(state.level.white_ufo_attack_time),
+            white_ufo_pattern_id=jnp.zeros_like(state.level.white_ufo_pattern_id),
+            white_ufo_pattern_timer=state.level.white_ufo_pattern_timer.at[0].set(
+                lane.astype(state.level.white_ufo_pattern_timer.dtype)
+            ),
+            white_ufo_time_on_lane=state.level.white_ufo_time_on_lane.at[0].set(0),
+            white_ufo_rngs=keys.at[0].set(k0),
+            white_ufo_left=jnp.int32(15),
+            enemy_shot_timer=jnp.zeros((n_shots,), dtype=state.level.enemy_shot_timer.dtype),
+            enemy_shot_pos=jnp.tile(bullet_off.reshape(2, 1), (1, n_shots)),
+            enemy_shot_explosion_frame=jnp.zeros(
+                (n_shots,), dtype=state.level.enemy_shot_explosion_frame.dtype
+            ),
+            enemy_shot_explosion_pos=jnp.tile(bullet_off.reshape(2, 1), (1, n_shots)),
+        )
+        return obs, state.replace(level=level)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def run(self, prev_state, new_state):
+        level = new_state.level
+        env = self._env
+        bullet_off = jnp.array(env.consts.BULLET_OFFSCREEN_POS, dtype=jnp.float32)
+        playable = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+
+        # Lane from *our* last write — game clobbers pattern_timer during step.
+        stored = prev_state.level.white_ufo_pattern_timer[0].astype(jnp.int32)
+        valid_stored = jnp.any(playable == stored)
+        killed = level.white_ufo_left < prev_state.level.white_ufo_left
+        need_new = killed | (~valid_stored)
+
+        keys = level.white_ufo_rngs
+        k0, k_lane = jax.random.split(keys[0])
+        new_lane = playable[jax.random.randint(k_lane, (), 0, playable.shape[0])]
+        lane = jnp.where(need_new, new_lane, stored)
+
+        new_pos, _ = self._place(lane)
+        n_shots = level.enemy_shot_pos.shape[1]
+        hold = prev_state.level.white_ufo_time_on_lane[0]
+        new_hold = jnp.where(need_new, jnp.int32(0), hold + 1)
+
+        level = level.replace(
+            white_ufo_pos=new_pos,
+            white_ufo_vel=jnp.zeros_like(level.white_ufo_vel),
+            white_ufo_attack_time=jnp.zeros_like(level.white_ufo_attack_time),
+            white_ufo_pattern_id=jnp.zeros_like(level.white_ufo_pattern_id),
+            white_ufo_pattern_timer=level.white_ufo_pattern_timer.at[0].set(
+                lane.astype(level.white_ufo_pattern_timer.dtype)
+            ),
+            white_ufo_time_on_lane=level.white_ufo_time_on_lane.at[0].set(new_hold),
+            white_ufo_rngs=keys.at[0].set(k0),
+            # Keep a stable remaining count so the game does not churn spawns;
+            # only drop on a real kill.
+            white_ufo_left=jnp.where(
+                killed,
+                jnp.maximum(level.white_ufo_left, jnp.int32(1)),
+                jnp.int32(15),
+            ),
+            enemy_shot_timer=jnp.zeros((n_shots,), dtype=level.enemy_shot_timer.dtype),
+            enemy_shot_pos=jnp.tile(bullet_off.reshape(2, 1), (1, n_shots)),
+            enemy_shot_explosion_frame=jnp.zeros(
+                (n_shots,), dtype=level.enemy_shot_explosion_frame.dtype
+            ),
+            enemy_shot_explosion_pos=jnp.tile(bullet_off.reshape(2, 1), (1, n_shots)),
+        )
+        return new_state.replace(level=level)

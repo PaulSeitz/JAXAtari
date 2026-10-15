@@ -37,6 +37,7 @@ from jaxtari.games.mods.seaquest.seaquest_mod_plugins import (
     SwapDiverEnemyLabelsMod,
     ExtraEnemyTypeMod,
     NoSurfacingDeathMod,
+    UnshootableSharksMod,
     MirrorDiversMod,
     MirrorWorldMod,
     InvertedControlsMod,
@@ -97,10 +98,12 @@ class SeaquestEnvMod(JaxtariModController):
         # Pair with CBL SEAQUEST_SWAP_DIVER_SHARK_ROLES (paper_eval relabel) so
         # COLLECT↔DESTROY follow the new physics. Distinct from sprite/OC-only
         # ``swap_diver_enemy_labels``.
+        "_unshootable_sharks": UnshootableSharksMod,
         "swap_diver_shark_roles": [
             "_peaceful_sharks",
             "_collect_sharks",
             "_disable_diver_collect",
+            "_unshootable_sharks",
             "_shootable_divers",
             "lethal_divers",
         ],

@@ -247,14 +247,80 @@ class NoEnemyTorpedoesMod(JaxtariPostStepModPlugin):
 
 
 class FasterEnemiesMod(JaxtariPostStepModPlugin):
-    """Enemies move one extra pixel per step in their travel direction."""
+    """Slightly faster escorts + their torpedoes: +1px on even frames.
+
+    Vanilla torpedoes already scale with difficulty on their own schedule; this
+    mod must boost missiles too or sped-up subs appear to escort their shot.
+    Even-frame boost (~+0.5 px/frame) still stacks with the difficulty ramp.
+    """
 
     @partial(jax.jit, static_argnums=(0,))
     def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
         del prev_state
+        extra = jnp.where(new_state.step_counter % 2 == 0, jnp.int32(1), jnp.int32(0))
+
+        def _boost(positions):
+            def _one(pos):
+                active = pos[2] != 0
+                new_x = pos[0] + pos[2] * extra
+                return jnp.where(active, pos.at[0].set(new_x), pos)
+
+            return jax.vmap(_one)(positions)
+
+        def _exit_mask(pos):
+            active = pos[2] != 0
+            exited = jnp.where(pos[2] > 0, pos[0] > 160, pos[0] < 0)
+            return jnp.logical_and(active, exited)
+
+        def _clear_exited(pos):
+            return jnp.where(_exit_mask(pos), jnp.zeros_like(pos), pos)
+
+        sharks_b = _boost(new_state.shark_positions)
+        subs_b = _boost(new_state.sub_positions)
+        shark_exit = jax.vmap(_exit_mask)(sharks_b)
+        sub_exit = jax.vmap(_exit_mask)(subs_b)
+        sharks = jax.vmap(_clear_exited)(sharks_b)
+        subs = jax.vmap(_clear_exited)(subs_b)
+
+        spawn = new_state.spawn_state
+        # ``survived`` is 12 slots for the *current* escort type (shark or sub).
+        is_sub_lane = spawn.prev_sub == 1  # (4,)
+        exit_12 = jnp.where(jnp.repeat(is_sub_lane, 3), sub_exit, shark_exit)
+        dir_12 = jnp.where(
+            jnp.repeat(is_sub_lane, 3),
+            subs_b[:, 2].astype(jnp.int32),
+            sharks_b[:, 2].astype(jnp.int32),
+        )
+        new_survived = jnp.where(exit_12, dir_12, spawn.survived)
+
+        sharks_live = jnp.any(sharks.reshape(4, 3, 3)[:, :, 2] != 0, axis=1)
+        subs_live = jnp.any(subs.reshape(4, 3, 3)[:, :, 2] != 0, axis=1)
+        live = jnp.where(is_sub_lane, subs_live, sharks_live)
+        reload = self._env.spawn_timer_reload(spawn.diver_array, after_survive=True)
+        timers = jnp.where(
+            jnp.logical_and(spawn.spawn_timers <= 0, jnp.logical_not(live)),
+            reload,
+            spawn.spawn_timers,
+        )
+        # Torpedoes use a separate difficulty schedule and were left at stock
+        # speed, so boosted subs looked like they were escorting their own shot.
+        # Match the same even-frame boost; drop missiles that leave the playfield.
+        missiles_b = _boost(new_state.enemy_missile_positions)
+        x_lo = self._env.consts.X_BORDERS[0]
+        x_hi = self._env.consts.X_BORDERS[1]
+
+        def _clear_missile(pos):
+            active = pos[2] != 0
+            oob = jnp.logical_or(pos[0] < x_lo, pos[0] > x_hi)
+            return jnp.where(jnp.logical_and(active, oob), jnp.zeros_like(pos), pos)
+
+        missiles = jax.vmap(_clear_missile)(missiles_b)
+
         return new_state.replace(
-            shark_positions=_boost_enemy_x(new_state.shark_positions, 1),
-            sub_positions=_boost_enemy_x(new_state.sub_positions, 1),
+            shark_positions=sharks,
+            sub_positions=subs,
+            enemy_missile_positions=missiles,
+            spawn_state=spawn.replace(survived=new_survived, spawn_timers=timers),
         )
 
 
@@ -292,8 +358,10 @@ class ShiftLanesMod(JaxtariInternalModPlugin):
     """Shift enemy lane Y positions downward by 10 pixels."""
 
     constants_overrides = {
-        "SPAWN_POSITIONS_Y": jnp.array([81, 105, 129, 149], dtype=jnp.int32),
-        "ENEMY_MISSILE_Y": jnp.array([83, 107, 131, 151], dtype=jnp.int32),
+        # Vanilla SPAWN_POSITIONS_Y [69, 93, 117, 141] + 10
+        "SPAWN_POSITIONS_Y": jnp.array([79, 103, 127, 151], dtype=jnp.int32),
+        # Vanilla ENEMY_MISSILE_Y [73, 97, 121, 145] + 10 (keep +4 lane offset)
+        "ENEMY_MISSILE_Y": jnp.array([83, 107, 131, 155], dtype=jnp.int32),
     }
 
 
@@ -454,15 +522,21 @@ class SlowOxygenDrainMod(JaxtariPostStepModPlugin):
 
 
 class SurfaceSubAlwaysMod(JaxtariPostStepModPlugin):
-    """Keep the surface submarine active near the top of the screen."""
+    """Keep the surface patrol boat looping: respawn on the right when absent.
+
+    Pinning X every frame left it glued to the right edge. Let ``surface_sub_step``
+    move it; only re-arm a spawn when the slot is empty.
+    """
 
     @partial(jax.jit, static_argnums=(0,))
     def run(self, prev_state: SeaquestState, new_state: SeaquestState) -> SeaquestState:
         del prev_state
-        # Match env dtype (reset uses jnp.zeros → float32); int32 here breaks noop-reset cond.
         dtype = new_state.surface_sub_position.dtype
-        active_sub = jnp.array([159, 45, -1], dtype=dtype)
-        return new_state.replace(surface_sub_position=active_sub)
+        exists = new_state.surface_sub_position[2] != 0
+        spawned = jnp.array([159, 45, -1], dtype=dtype)
+        return new_state.replace(
+            surface_sub_position=jnp.where(exists, new_state.surface_sub_position, spawned)
+        )
 
 
 class InvertedLanesMod(JaxtariPostStepModPlugin):
@@ -871,21 +945,24 @@ class ExtraEnemyTypeMod(JaxtariPostStepModPlugin):
 
 
 class NoSurfacingDeathMod(JaxtariInternalModPlugin):
-    """Surfacing with 0 divers no longer costs a life.
+    """Surfacing with 0 divers: no death, no O₂ refill, no surface lock.
 
-    Collisions, oxygen-out, and the 1–5 diver deposit tax are unchanged.
-    Divers collected is clamped at 0 so a 0-diver surface does not go negative.
+    Vanilla refills whenever ``divers_collected >= 0`` (always true for an empty
+    bag), so gating only on the single ``lose_life`` frame still let later
+    surface frames top up oxygen. Keep withholding refill for the whole empty
+    surface stay (non-init). Deposit tax / collisions / oxygen-out unchanged.
     """
 
     @partial(jax.jit, static_argnums=(0,))
     def update_oxygen(self, state, player_x, player_y, player_missile_position):
         from jaxtari.games.jax_seaquest import JaxSeaquest
 
+        in_x, in_y, in_missile = player_x, player_y, player_missile_position
         (
             new_oxygen,
-            player_x,
-            player_y,
-            player_missile_position,
+            out_x,
+            out_y,
+            out_missile,
             oxygen_depleted,
             _lose_life,
             new_divers_collected,
@@ -895,12 +972,17 @@ class NoSurfacingDeathMod(JaxtariInternalModPlugin):
         ) = JaxSeaquest.update_oxygen(
             self._env, state, player_x, player_y, player_missile_position
         )
-        del _lose_life
+        in_init = state.just_surfaced == -1
+        at_surface = jnp.logical_or(in_y == 46, out_y == 46)
+        empty_surface = jnp.logical_and(
+            jnp.logical_and(state.divers_collected == 0, at_surface),
+            jnp.logical_not(in_init),
+        )
         return (
-            new_oxygen,
-            player_x,
-            player_y,
-            player_missile_position,
+            jnp.where(empty_surface, state.oxygen, new_oxygen),
+            jnp.where(empty_surface, in_x, out_x),
+            jnp.where(empty_surface, in_y, out_y),
+            jnp.where(empty_surface, in_missile, out_missile),
             oxygen_depleted,
             jnp.array(False),
             jnp.maximum(new_divers_collected, jnp.int32(0)),
@@ -937,6 +1019,31 @@ _LR_SWAP = jnp.array(
         14,  # UPLEFTFIRE -> UPRIGHTFIRE
         17,  # DOWNRIGHTFIRE -> DOWNLEFTFIRE
         16,  # DOWNLEFTFIRE -> DOWNRIGHTFIRE
+    ],
+    dtype=jnp.int32,
+)
+
+# Full axis invert: left↔right and up↔down (plus diagonals / fire variants).
+_LR_UD_SWAP = jnp.array(
+    [
+        0,   # NOOP
+        1,   # FIRE
+        5,   # UP -> DOWN
+        4,   # RIGHT -> LEFT
+        3,   # LEFT -> RIGHT
+        2,   # DOWN -> UP
+        9,   # UPRIGHT -> DOWNLEFT
+        8,   # UPLEFT -> DOWNRIGHT
+        7,   # DOWNRIGHT -> UPLEFT
+        6,   # DOWNLEFT -> UPRIGHT
+        13,  # UPFIRE -> DOWNFIRE
+        12,  # RIGHTFIRE -> LEFTFIRE
+        11,  # LEFTFIRE -> RIGHTFIRE
+        10,  # DOWNFIRE -> UPFIRE
+        17,  # UPRIGHTFIRE -> DOWNLEFTFIRE
+        16,  # UPLEFTFIRE -> DOWNRIGHTFIRE
+        15,  # DOWNRIGHTFIRE -> UPLEFTFIRE
+        14,  # DOWNLEFTFIRE -> UPRIGHTFIRE
     ],
     dtype=jnp.int32,
 )
@@ -1119,7 +1226,7 @@ class MirrorWorldMod(JaxtariInternalModPlugin):
 
 
 class InvertedControlsMod(JaxtariInternalModPlugin):
-    """Permute the action table: left ↔ right (mapper / embodiment probe)."""
+    """Permute the action table: left ↔ right and up ↔ down."""
 
     conflicts_with = ["mirror_world", "momentum"]
 
@@ -1127,7 +1234,7 @@ class InvertedControlsMod(JaxtariInternalModPlugin):
     def player_step(self, state: SeaquestState, action: chex.Array):
         from jaxtari.games.jax_seaquest import JaxSeaquest
 
-        remapped = _LR_SWAP[action.astype(jnp.int32)]
+        remapped = _LR_UD_SWAP[action.astype(jnp.int32)]
         return JaxSeaquest.player_step(self._env, state, remapped)
 
 
@@ -1203,11 +1310,73 @@ class SparseWorldMod(JaxtariPostStepModPlugin):
 
 
 class TinyDiversMod(JaxtariInternalModPlugin):
-    """Shrink diver hitboxes (S4 sub-φ8 aim probe). Sprites unchanged."""
+    """Shrink diver hitboxes and sprites.
+
+    Sprite override lives in ``ASSET_CONFIG`` via ``asset_overrides``, so a
+    native-downscale renderer rebuild (fresh bake from consts) keeps the tiny
+    divers without any core ``apply_native_downscaling`` hook.
+    """
 
     constants_overrides = {
         "DIVER_SIZE": jnp.array([4, 5], dtype=jnp.int32),
     }
+
+    asset_overrides = {
+        "diver": {
+            "name": "diver",
+            "type": "group",
+            "files": ["tiny_diver_1.npy", "tiny_diver_2.npy"],
+        }
+    }
+
+
+class UnshootableSharksMod(JaxtariInternalModPlugin):
+    """Player torpedoes pass through sharks (subs still die). Used by role-swap."""
+
+    conflicts_with = ["peaceful_enemies"]
+
+    @partial(jax.jit, static_argnums=(0,))
+    def check_missile_collisions(
+        self,
+        missile_pos,
+        shark_positions,
+        sub_positions,
+        diver_positions,
+        score,
+        successful_rescues,
+        spawn_state,
+        rng_key,
+    ):
+        from jaxtari.games.jax_seaquest import JaxSeaquest
+
+        (
+            new_missile,
+            _ignored_sharks,
+            new_subs,
+            new_divers,
+            new_score,
+            new_spawn_state,
+            new_rng,
+        ) = JaxSeaquest.check_missile_collisions(
+            self._env,
+            missile_pos,
+            jnp.zeros_like(shark_positions),
+            sub_positions,
+            diver_positions,
+            score,
+            successful_rescues,
+            spawn_state,
+            rng_key,
+        )
+        return (
+            new_missile,
+            shark_positions,
+            new_subs,
+            new_divers,
+            new_score,
+            new_spawn_state,
+            new_rng,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1782,6 +1951,7 @@ class GhostSharksMod(JaxtariInternalModPlugin):
         missile_pos,
         shark_positions,
         sub_positions,
+        diver_positions,
         score,
         successful_rescues,
         spawn_state,
@@ -1794,6 +1964,7 @@ class GhostSharksMod(JaxtariInternalModPlugin):
             new_missile,
             _ignored_sharks,
             new_subs,
+            new_divers,
             new_score,
             new_spawn_state,
             new_rng,
@@ -1802,6 +1973,7 @@ class GhostSharksMod(JaxtariInternalModPlugin):
             missile_pos,
             jnp.zeros_like(shark_positions),
             sub_positions,
+            diver_positions,
             score,
             successful_rescues,
             spawn_state,
@@ -1811,6 +1983,7 @@ class GhostSharksMod(JaxtariInternalModPlugin):
             new_missile,
             shark_positions,
             new_subs,
+            new_divers,
             new_score,
             new_spawn_state,
             new_rng,

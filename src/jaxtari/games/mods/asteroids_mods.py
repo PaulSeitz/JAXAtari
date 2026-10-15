@@ -5,12 +5,20 @@ from jaxtari.games.mods.asteroids.asteroids_mod_plugins import (
     XDominantRocksMod, NoMomentumMod, FasterAsteroidsMod, FrozenAsteroidsMod,
 )
 
+from jaxtari.games.mods.robustness_probes import (
+    AsteroidsShiftInitialRocksMod,
+    AsteroidsNoShipCollisionsMod,
+)
+
 class AsteroidsEnvMod(JaxtariModController):
     """
     Game-specific Mod Controller for Asteroids.
     """
 
     REGISTRY = {
+        "shift_initial_rocks": AsteroidsShiftInitialRocksMod,
+        "no_ship_collisions": AsteroidsNoShipCollisionsMod,
+
         "dont_shoot": DontShootMod,
         "matrix_theme": MatrixMod,
         "slow_asteroids": SlowAsteroidsMod,

@@ -3,7 +3,31 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 from jaxtari.modification import JaxtariModController
-from jaxtari.games.mods.pong.pong_mod_plugins import LazyEnemyMod, RandomEnemyMod, AlwaysZeroScoreMod, LinearMovementMod, ShiftPlayerMod, ShiftEnemyMod, NoFireMod, ChangeBackgroundColorMod, ChangePlayerColorMod, TriplePongMod
+from jaxtari.games.mods.pong.pong_mod_plugins import (
+    LazyEnemyMod,
+    RandomEnemyMod,
+    AlwaysZeroScoreMod,
+    LinearMovementMod,
+    ShiftPlayerMod,
+    ShiftEnemyMod,
+    NoFireMod,
+    ChangeBackgroundColorMod,
+    ChangePlayerColorMod,
+)
+
+# TriplePongMod lives on newer jaxtari mainlines; this fork's plugin module may
+# not ship it yet. Paper-core mods (shift_player / linear_movement / lazy_enemy)
+# do not need it — keep the import optional so Pong still loads.
+try:
+    from jaxtari.games.mods.pong.pong_mod_plugins import TriplePongMod
+except ImportError:  # pragma: no cover
+    TriplePongMod = None  # type: ignore
+
+
+from jaxtari.games.mods.robustness_probes import (
+    PongShiftPlayerPlaneMod,
+    PongSlowerEnemyMod,
+)
 
 class PongEnvMod(JaxtariModController):    
     """
@@ -12,6 +36,9 @@ class PongEnvMod(JaxtariModController):
     """
 
     REGISTRY = {
+        "shift_player_plane": PongShiftPlayerPlaneMod,
+        "slower_enemy": PongSlowerEnemyMod,
+
         "lazy_enemy": LazyEnemyMod,
         "random_enemy": RandomEnemyMod,
         "zero_score": AlwaysZeroScoreMod,
@@ -21,7 +48,7 @@ class PongEnvMod(JaxtariModController):
         "no_fire": NoFireMod,
         "change_background_color": ChangeBackgroundColorMod,
         "change_player_color": ChangePlayerColorMod,
-        "triple_pong": TriplePongMod,
+        **({"triple_pong": TriplePongMod} if TriplePongMod is not None else {}),
     }
 
     _mod_sprite_dir = os.path.join(os.path.dirname(__file__), "pong", "sprites")
@@ -47,7 +74,7 @@ class PongEnvMod(JaxtariModController):
         (each in its own color, not-yet-spawned ones hidden) and the 3 enemy
         paddles; otherwise it simply delegates to the base environment.
         """
-        if not self._has_triple_pong:
+        if not self._has_triple_pong or TriplePongMod is None:
             return self._env.render(state)
 
         renderer = self._env.renderer

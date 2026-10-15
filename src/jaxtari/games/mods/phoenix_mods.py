@@ -17,12 +17,20 @@ from jaxtari.games.mods.phoenix.phoenix_mod_plugins import (
 )
 
 
+from jaxtari.games.mods.robustness_probes import (
+    PhoenixShiftPlayerRowMod,
+    PhoenixNoEnemyFireMod,
+)
+
 class PhoenixEnvMod(JaxtariModController):
     """
     Game-specific mod controller for Phoenix.
     """
 
     REGISTRY = {
+        "shift_player_row": PhoenixShiftPlayerRowMod,
+        "no_enemy_fire": PhoenixNoEnemyFireMod,
+
         "boss_late_missiles": BossLateMissilesMod,
         "infinite_lives": InfiniteLivesMod,
         "fast_player": FastPlayerMod,

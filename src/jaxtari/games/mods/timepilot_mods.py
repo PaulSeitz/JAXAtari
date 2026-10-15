@@ -8,10 +8,18 @@ from jaxtari.games.mods.timepilot.timepilot_mod_plugins import (
 )
 
 
+from jaxtari.games.mods.robustness_probes import (
+    TimePilotShiftAnchorMod,
+    TimePilotNoEnemyFireMod,
+)
+
 class TimePilotEnvMod(JaxtariModController):
     """Game-specific mod controller for Time Pilot."""
 
     REGISTRY = {
+        "shift_player_anchor": TimePilotShiftAnchorMod,
+        "no_enemy_fire": TimePilotNoEnemyFireMod,
+
         "spawn_axis_bias": SpawnAxisBiasMod,
         "plane_inertia": PlaneInertiaMod,
         "faster_enemies": FasterEnemiesMod,

@@ -13,12 +13,20 @@ from jaxtari.games.mods.beamrider.beamrider_mod_plugins import (
 )
 
 
+from jaxtari.games.mods.robustness_probes import (
+    BeamriderShiftPlayerRowMod,
+    BeamriderNoEnemyShotsMod,
+)
+
 class BeamRiderEnvMod(JaxtariModController):
     """
     Game-specific Mod Controller for Beamrider.
     """
 
     REGISTRY = {
+        "shift_player_row": BeamriderShiftPlayerRowMod,
+        "no_enemy_shots": BeamriderNoEnemyShotsMod,
+
         "double_enemy_speed": DoubleEnemySpeedMod,
         "fog_of_war": FogOfWarMod,
         "hardcore": HardcoreMod,

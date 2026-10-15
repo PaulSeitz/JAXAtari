@@ -6,6 +6,11 @@ from jaxtari.games.mods.freeway.freeway_mod_plugins import (
     DifficultyEasyMod, DifficultyNormalMod, DifficultyHardMod, DifficultyImpossibleMod
 )
 
+from jaxtari.games.mods.robustness_probes import (
+    FreewayShiftCarRowsMod,
+    FreewayNoCarsMod,
+)
+
 class FreewayEnvMod(JaxtariModController):
     """
     Game-specific Mod Controller for Freeway.
@@ -13,6 +18,9 @@ class FreewayEnvMod(JaxtariModController):
     """
 
     REGISTRY = {
+        "shift_car_rows": FreewayShiftCarRowsMod,
+        "no_cars": FreewayNoCarsMod,
+
         "stop_all_cars": StopAllCarsMod,
         "static_cars": StaticCarsMod,
         "slow_cars": SlowCarsMod,

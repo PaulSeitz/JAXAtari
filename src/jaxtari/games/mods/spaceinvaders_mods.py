@@ -13,12 +13,20 @@ from jaxtari.games.mods.spaceinvaders.spaceinvaders_mod_plugins import (
     SaucerOnlyMod,
 )
 
+from jaxtari.games.mods.robustness_probes import (
+    SpaceInvadersShiftShieldRowMod,
+    SpaceInvadersNoEnemyFireMod,
+)
+
 class SpaceInvadersEnvMod(JaxtariModController):    
     """
     Game-specific Mod Controller for SpaceInvaders.
     """
 
     REGISTRY = {
+        "shift_shield_row": SpaceInvadersShiftShieldRowMod,
+        "no_enemy_fire": SpaceInvadersNoEnemyFireMod,
+
         "disable_shield_left": DisableShieldLeftMod,
         "disable_shield_middle": DisableShieldMiddleMod,
         "disable_shield_right": DisableShieldRightMod,
